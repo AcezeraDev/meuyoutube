@@ -126,6 +126,8 @@ export class Player {
   // Põe a fonte no <video>: arquivo comum direto; live (HLS) pelo hls.js, que escolhe a qualidade sozinho.
   async setSrc(src) {
     if (!this.quality.hls) { this.v.src = src; return; }
+    // Celular (app Android, Safari): o próprio player do aparelho toca HLS, sem baixar o hls.js.
+    if (this.v.canPlayType('application/vnd.apple.mpegurl')) { this.v.src = src; return; }
     const Hls = window.MediaSource ? (await import(HLS_JS).catch(() => ({}))).default : null;
     if (this.destroyed) return;
     if (!Hls?.isSupported()) { this.v.src = src; return; } // Safari e celulares tocam HLS sozinhos
@@ -642,12 +644,22 @@ export class Player {
     this.retried = true;
     const t = this.now;
     const playing = this.playing;
-    try { await fetch(`/api/video?id=${this.info.id}&fresh=1`); } catch {}
+    // No PC os endereços (/media/...) continuam os mesmos; no app eles são links do YouTube e mudam ao renovar.
+    let fresh = null;
+    try { fresh = await (await fetch(`/api/video?id=${this.info.id}&fresh=1`)).json(); } catch {}
+    if (fresh?.qualities?.length) {
+      const q = fresh.qualities.find((x) => x.height === this.quality.height) || fresh.qualities[0];
+      const lang = this.info.audios?.find((x) => x.src === this.audioSrc)?.lang;
+      this.info.qualities = fresh.qualities;
+      this.info.audios = fresh.audios || [];
+      this.quality = q;
+      if (fresh.audio) this.audioSrc = (fresh.audios || []).find((x) => x.lang === lang)?.src || fresh.audio;
+    }
     // Live: recomeça do momento atual (e pode tentar de novo daqui a 30 s, se o sinal cair outra vez).
-    if (this.hls) { setTimeout(() => { this.retried = false; }, 30000); return this.setSrc(this.quality.src); }
-    const bust = `?r=${Date.now()}`;
-    if (!this.audioOnly) this.v.src = this.quality.src + bust;
-    if (this.a) this.a.src = this.audioSrc + bust;
+    if (this.quality.hls) { setTimeout(() => { this.retried = false; }, 30000); return this.setSrc(this.quality.src); }
+    const bust = (src) => (src.startsWith('/') ? `${src}?r=${Date.now()}` : src);
+    if (!this.audioOnly) this.v.src = bust(this.quality.src);
+    if (this.a) this.a.src = bust(this.audioSrc);
     (this.audioOnly ? this.a : this.v).addEventListener('loadedmetadata', () => { this.seek(t); if (playing) this.play(); }, { once: true });
   }
 
@@ -836,6 +848,7 @@ export class Player {
     clearTimeout(this.idleTimer);
     clearInterval(this.sleepTimer);
     this.hls?.destroy();
+    if ('mediaSession' in navigator) navigator.mediaSession.metadata = null; // tira os controles de mídia do sistema
     document.removeEventListener('keydown', this.onKey);
     document.removeEventListener('fullscreenchange', this.onFs);
     document.removeEventListener('visibilitychange', this.onVisible);

@@ -1,0 +1,97 @@
+# Gera o APK do MeuTube e publica na release fixa "app-latest" (o link de download nunca muda).
+#
+# Assinatura: o APK precisa ser assinado sempre com a MESMA chave, senão a atualização não instala por cima.
+# - secret MEUTUBE_KEYSTORE_PASSWORD: senha da chave (obrigatório; crie uma vez com "gh secret set").
+# - secret MEUTUBE_KEYSTORE_B64: a chave em base64. Se ainda não existir, este workflow cria uma chave nova,
+#   protegida pela senha acima, e envia como artifact "keystore". Depois ela vira secret com:
+#   gh run download <id> -n keystore && base64 -w0 meutube.jks | gh secret set MEUTUBE_KEYSTORE_B64
+name: App Android
+
+on:
+  push:
+    branches: [main]
+    paths: ['mobile/**', 'public/**', 'lib/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Montar a tela e o projeto Android
+        working-directory: mobile
+        run: |
+          npm ci
+          node build.mjs
+          npx cap sync android
+
+      - name: Chave de assinatura
+        env:
+          KS_B64: ${{ secrets.MEUTUBE_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.MEUTUBE_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KS_PASS" ]; then echo "::error::Falta o secret MEUTUBE_KEYSTORE_PASSWORD"; exit 1; fi
+          KS="$RUNNER_TEMP/meutube.jks"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+          else
+            keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias meutube -keyalg RSA -keysize 4096 \
+              -validity 36500 -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=MeuTube, C=BR"
+            echo "NEW_KEYSTORE=1" >> "$GITHUB_ENV"
+            echo "::warning::Chave nova criada. Salve o artifact 'keystore' como secret MEUTUBE_KEYSTORE_B64."
+          fi
+          echo "MEUTUBE_KEYSTORE=$KS" >> "$GITHUB_ENV"
+          echo "MEUTUBE_KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+
+      - name: Enviar a chave nova (protegida pela senha)
+        if: env.NEW_KEYSTORE == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: keystore
+          path: ${{ runner.temp }}/meutube.jks
+          retention-days: 3
+
+      - name: Gerar o APK
+        working-directory: mobile/android
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/MeuTube.apk"
+          echo "{\"versionCode\": $VERSION_CODE, \"commit\": \"$GITHUB_SHA\"}" > "$GITHUB_WORKSPACE/version.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeuTube-apk
+          path: MeuTube.apk
+          retention-days: 7
+
+      - name: Publicar na release app-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view app-latest >/dev/null 2>&1 || gh release create app-latest --title "MeuTube para Android" \
+            --notes "Baixe o MeuTube.apk abaixo e abra no celular. Esta página é atualizada a cada nova versão." --latest
+          gh release upload app-latest MeuTube.apk version.json --clobber
+          gh release edit app-latest --notes "Baixe o MeuTube.apk abaixo e abra no celular. Versão ${{ github.run_number }} ($(date -u +%d/%m/%Y))."

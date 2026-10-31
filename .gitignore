@@ -10,3 +10,9 @@ avatars.json
 # Dependências e ferramentas locais
 node_modules/
 .claude/settings.local.json
+
+# App Android: pastas geradas e chaves de assinatura (a keystore fica só nos secrets do GitHub)
+mobile/www/
+*.jks
+*.keystore
+*.p12

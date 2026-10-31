@@ -1311,3 +1311,10 @@ body.pip-doc { margin: 0; min-height: 0; background: #000; overflow: hidden; }
 .player.in-pip:not(.pip-doc .player)::after {
   content: "Tocando no miniplayer"; position: absolute; inset: 0; display: grid; place-items: center; background: #05080d; color: var(--text-2); font-weight: 700;
 }
+
+/* App Android: no pop-up do sistema a janelinha mostra a página inteira, então o player ocupa tudo e os controles somem. */
+body.native-pip { overflow: hidden; }
+body.native-pip .player { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; max-width: none !important; margin: 0 !important; border-radius: 0 !important; z-index: 2147483647; aspect-ratio: auto !important; transform: none !important; }
+body.native-pip .player.in-pip::after,
+body.native-pip .player > :not(video) { display: none !important; }
+body.native-pip .player video { object-fit: contain; }
