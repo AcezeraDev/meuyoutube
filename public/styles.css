@@ -1470,3 +1470,22 @@ html { scrollbar-width: thin; scrollbar-color: #2b3a4d transparent; }
   .later, .compact .later { width: 36px; height: 36px; }
   .more, .compact .more, .card .more { width: 40px; height: 40px; }
 }
+
+/* ---------- estatísticas: juntar PC e celular ---------- */
+.sync-panel { margin: 4px 0 20px; }
+.sync-panel h3 { display: flex; align-items: center; gap: 8px; }
+.sync-panel h3 svg { color: var(--v2); }
+.sync-panel .acc-steps { margin: 14px 0; }
+.sync-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.sync-form input { flex: 1; min-width: 200px; height: 42px; padding: 0 14px; border-radius: 21px; border: 1px solid var(--line); background: var(--raised); color: var(--text); font: inherit; }
+.sync-err { color: #ff8a8a; }
+
+/* App Android: tela cheia própria (o Capacitor cancela a do navegador). O player cobre tudo, com os controles. */
+body.app-fs-on { overflow: hidden; }
+.player.app-fs {
+  position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; height: 100dvh !important;
+  max-width: none !important; margin: 0 !important; border-radius: 0 !important; aspect-ratio: auto !important;
+  transform: none !important; z-index: 2147483000; background: #000;
+}
+.player.app-fs video { object-fit: contain; }
+body.app-fs-on .masthead, body.app-fs-on .bottom, body.app-fs-on .minibar { visibility: hidden; }

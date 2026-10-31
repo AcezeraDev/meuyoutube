@@ -88,6 +88,34 @@ export function installNative() {
     else if (action === 'pause') [...media].forEach((m) => m.pause());
   });
 
+  // ---------- tela cheia ----------
+  // O Capacitor cancela a tela cheia da página, então ela é feita aqui: o elemento ocupa a tela toda (CSS .app-fs),
+  // o Android esconde as barras e gira o celular. Para o player é como a tela cheia normal do navegador.
+  let fsEl = null;
+  const fsChange = () => document.dispatchEvent(new Event('fullscreenchange'));
+  Object.defineProperty(Document.prototype, 'fullscreenElement', { configurable: true, get: () => fsEl });
+  Object.defineProperty(Document.prototype, 'fullscreenEnabled', { configurable: true, get: () => true });
+  Element.prototype.requestFullscreen = function () {
+    if (fsEl) fsEl.classList.remove('app-fs');
+    fsEl = this;
+    this.classList.add('app-fs');
+    document.body.classList.add('app-fs-on');
+    const v = this.querySelector('video');
+    const landscape = !v || !v.videoHeight || v.videoWidth >= v.videoHeight;
+    fsChange();
+    return Media.setFullscreen({ on: true, landscape }).catch(() => {});
+  };
+  Document.prototype.exitFullscreen = function () {
+    if (!fsEl) return Promise.resolve();
+    fsEl.classList.remove('app-fs');
+    fsEl = null;
+    document.body.classList.remove('app-fs-on');
+    fsChange();
+    return Media.setFullscreen({ on: false }).catch(() => {});
+  };
+  // Botão voltar do Android na tela cheia: só sai dela.
+  Media.addListener('action', ({ action }) => { if (action === 'exit-fullscreen') document.exitFullscreen(); });
+
   // ---------- pop-up ----------
   let pipEl = null;
   Object.defineProperty(Document.prototype, 'pictureInPictureEnabled', { configurable: true, get: () => true });

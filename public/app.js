@@ -1,6 +1,7 @@
 import { icon } from './icons.js';
 import { Player, SEG_NAMES } from './player.js';
 import * as lib from './library.js';
+import * as sync from './sync.js';
 import { mountComments, mountChat } from './social.js';
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -435,6 +436,7 @@ function route() {
   const t = ++token;
   const prevHash = lastHash;
   stopShorts();
+  if (document.fullscreenElement) document.exitFullscreen?.().catch?.(() => {}); // trocar de tela sai da tela cheia
   scrollPos.set(lastHash, scrollY);
   lastHash = location.hash;
   const restore = fromPop ? scrollPos.get(location.hash) : 0;
@@ -1130,7 +1132,7 @@ async function watchView(id, t, listId) {
         else if (d - time <= 15) delete all[id];
         store.set('progress', all);
       },
-      onTick: (secs) => lib.addWatch(secs, known.get(id) || slim(info)),
+      onTick: (secs) => { lib.addWatch(secs, known.get(id) || slim(info)); sync.scheduleSync(); },
       onToast: toast,
       onRate: (r) => {
         lib.setChannelSpeed(info.channelId, r);
@@ -1501,6 +1503,30 @@ function openMore(btn, v) {
 addEventListener('scroll', () => $('.pop')?.remove(), { passive: true });
 
 // ---------- estatísticas ----------
+// Quadro para juntar as estatísticas do PC e do celular (pelo GitHub).
+function syncPanel() {
+  const st = sync.syncState();
+  const other = IN_APP ? 'PC' : 'celular';
+  if (!st.on) {
+    return `<div class="panel sync-panel"><h3>${icon('repeat', 20)}Juntar com o ${other}</h3>
+      <p class="meta sm">As estatísticas ficam iguais no PC e no celular. Elas ficam guardadas num arquivo secreto da sua conta do GitHub (só quem tem o código consegue mexer).</p>
+      <ol class="acc-steps">
+        <li><span>1</span><div>Abra <a href="${sync.TOKEN_URL}" target="_blank" rel="noopener noreferrer"><strong>esta página do GitHub</strong></a> já entrando na sua conta. A opção <strong>gist</strong> já vem marcada; em “Expiration” escolha <strong>No expiration</strong>.</div></li>
+        <li><span>2</span><div>Clique em <strong>Generate token</strong> no fim da página e copie o código (começa com <code>ghp_</code>).</div></li>
+        <li><span>3</span><div>Cole aqui e toque em Conectar. Faça o mesmo no ${other}, com o <strong>mesmo código</strong>.</div></li>
+      </ol>
+      <div class="inline-form sync-form"><input id="sync-token" type="password" placeholder="ghp_..." autocomplete="off" spellcheck="false" aria-label="Código do GitHub"><button class="sub-btn rpl" data-sync-connect>Conectar</button></div>
+      <div id="sync-msg" aria-live="polite"></div>
+    </div>`;
+  }
+  const devs = st.devices.map((d) => `<b>${esc(d.name)}</b> (atualizado ${relTime(d.updated)})`).join(', ');
+  return `<div class="panel sync-panel"><h3>${icon('check', 20)}Juntando com o ${other}</h3>
+    <p class="meta sm">Somando: <b>${esc(sync.deviceName())}</b> (este aparelho)${devs ? `, ${devs}` : `. O ${other} aparece aqui depois que você conectar nele com o mesmo código`}.${st.last ? ` Última sincronização ${relTime(st.last)}.` : ''}</p>
+    ${st.error ? `<p class="meta sm sync-err">${esc(st.error)}</p>` : ''}
+    <div class="blocked-actions"><button class="pill rpl" data-sync-now>${icon('repeat', 18)}Sincronizar agora</button><button class="pill rpl" data-sync-off>${icon('logout', 18)}Parar de juntar</button></div>
+  </div>`;
+}
+
 function statsView() {
   document.title = 'Suas estatísticas - MeuTube';
   const s = lib.statsSummary();
@@ -1510,7 +1536,7 @@ function statsView() {
   const wd = new Intl.DateTimeFormat('pt-BR', { weekday: 'short' });
   const card = (ic, label, value, sub = '', count = '') => `<div class="stat-card"><span class="stat-ic">${icon(ic, 20)}</span><span class="meta sm">${label}</span><b ${count !== '' ? `data-count="${count}"` : ''}>${value}</b>${sub ? `<span class="meta xs">${sub}</span>` : ''}</div>`;
   app.innerHTML = `<section class="view stats">
-    <div class="page-head"><h2>Suas estatísticas</h2><p class="meta">Só neste navegador. Conta o tempo em que o vídeo esteve tocando de verdade.</p></div>
+    <div class="page-head"><h2>Suas estatísticas</h2><p class="meta">${sync.syncState().on ? 'Somando o PC e o celular.' : `Só ${IN_APP ? 'neste celular' : 'neste navegador'}.`} Conta o tempo em que o vídeo esteve tocando de verdade.</p></div>
     <div class="stat-cards">
       ${card('clock', 'Hoje', longDur(s.today))}
       ${card('chart', 'Últimos 7 dias', longDur(s.week))}
@@ -1526,8 +1552,11 @@ function statsView() {
         ${s.top.length ? s.top.map((c, i) => `<a class="top-ch" href="#/channel/${c.id}" style="--i:${i}">${avatar(c.name, c.avatar, 'md', c.id)}<span class="top-text"><b>${esc(c.name)}</b><span class="meta sm">${longDur(c.secs)}</span><i class="top-bar" style="--w:${(c.secs / s.top[0].secs) * 100}%"></i></span></a>`).join('') : '<p class="meta">Assista a alguns vídeos e seus canais favoritos aparecem aqui.</p>'}
       </div>
     </div>
+    ${syncPanel()}
     <button class="pill rpl" data-stats-reset>${icon('trash', 18)}Zerar estatísticas</button>
   </section>`;
+  // Traz as dos outros aparelhos; se mudou algo, desenha de novo.
+  if (sync.syncState().on) sync.syncNow().then((changed) => { if (changed && location.hash === '#/stats') statsView(); }).catch(() => {});
   // Números contando até o valor (animação).
   $$('[data-count]').forEach((el) => {
     const target = Number(el.dataset.count);
@@ -1579,7 +1608,7 @@ function settingsView() {
 document.addEventListener('click', (e) => {
   const t = e.target;
   if (!t.closest?.('.pop, [data-more]')) $('.pop')?.remove();
-  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset]');
+  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset], [data-sync-connect], [data-sync-now], [data-sync-off]');
   if (!el) return;
   const vid = () => known.get(location.hash.match(/watch\/([\w-]{11})/)?.[1]) || null;
 
@@ -1679,8 +1708,28 @@ document.addEventListener('click', (e) => {
   if (el.dataset.unword) { lib.removeWord(el.dataset.unword); return settingsView(); }
   if (el.dataset.unblock) { lib.unblockChannel(el.dataset.unblock); return settingsView(); }
   if (el.hasAttribute('data-stats-reset')) {
-    if (!confirm('Zerar todas as estatísticas de tempo assistido?')) return;
+    if (!confirm(sync.syncState().on ? 'Zerar as estatísticas deste aparelho? (As do outro aparelho continuam.)' : 'Zerar todas as estatísticas de tempo assistido?')) return;
     lib.resetStats();
+    sync.syncNow().catch(() => {});
+    return statsView();
+  }
+  if (el.hasAttribute('data-sync-connect')) {
+    el.disabled = true;
+    el.textContent = 'Conectando…';
+    sync.connect($('#sync-token').value)
+      .then(() => { toast('Estatísticas juntas: PC e celular'); statsView(); burst($('.sync-panel h3'), 18); })
+      .catch((err) => { $('#sync-msg').innerHTML = failure(err); el.disabled = false; el.textContent = 'Conectar'; });
+    return;
+  }
+  if (el.hasAttribute('data-sync-now')) {
+    el.disabled = true;
+    sync.syncNow().then(() => toast('Sincronizado')).catch((err) => toast(err.message)).finally(() => { if (location.hash === '#/stats') statsView(); });
+    return;
+  }
+  if (el.hasAttribute('data-sync-off')) {
+    if (!confirm('Parar de juntar as estatísticas neste aparelho? O que já foi guardado continua no GitHub.')) return;
+    sync.disconnect();
+    toast('Estatísticas só deste aparelho');
     return statsView();
   }
 });
@@ -2449,6 +2498,7 @@ addEventListener('meutube-toast', (e) => toast(e.detail)); // avisos vindos do a
 $('[data-logo]').innerHTML = logo();
 document.fonts?.ready.then(moveChipInd);
 renderGuide();
+sync.syncNow().catch(() => {}); // traz as estatísticas do outro aparelho e manda as deste
 // A conta chega depois da primeira tela: as telas que dependem dela são desenhadas de novo (vídeo e Shorts não,
 // para não recomeçar o que está tocando).
 loadAccount().then(() => {

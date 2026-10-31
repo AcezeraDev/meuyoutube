@@ -1,5 +1,7 @@
 // Biblioteca local do MeuTube: playlists, momentos marcados, estatísticas, filtros e ajustes.
 // Tudo fica só neste navegador (localStorage).
+import { otherStats } from './sync.js';
+
 const get = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const set = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -89,8 +91,23 @@ export function addWatch(seconds, v) {
   s.videos[v.id] = 1;
   set('stats', s);
 }
+// Soma as estatísticas deste aparelho com as dos outros (PC e celular, sincronizadas pelo GitHub).
+function allStats() {
+  const s = { days: {}, channels: {}, videos: {} };
+  for (const one of [get('stats', {}), ...otherStats()]) {
+    for (const [d, secs] of Object.entries(one.days || {})) s.days[d] = (s.days[d] || 0) + secs;
+    for (const [id, c] of Object.entries(one.channels || {})) {
+      const cur = s.channels[id] || { name: c.name, avatar: c.avatar || '', secs: 0 };
+      cur.secs += c.secs || 0;
+      if (!cur.avatar && c.avatar) cur.avatar = c.avatar;
+      s.channels[id] = cur;
+    }
+    Object.assign(s.videos, one.videos || {});
+  }
+  return s;
+}
 export function statsSummary() {
-  const s = get('stats', { days: {}, channels: {}, videos: {} });
+  const s = allStats();
   const last7 = [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date();

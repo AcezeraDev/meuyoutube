@@ -181,8 +181,9 @@ export class Player {
       }
       if (this.v.readyState < 1) await new Promise((r) => this.v.addEventListener('loadedmetadata', r, { once: true }));
       await this.v.requestPictureInPicture();
-    } catch {
-      this.chip('Não consegui abrir o miniplayer');
+    } catch (e) {
+      // No app de celular o motivo vem do Android (ex.: pop-up desligado nas configurações).
+      this.chip(window.meutubeApp && e?.message ? e.message : 'Não consegui abrir o miniplayer');
     }
   }
   async openDocPip() {

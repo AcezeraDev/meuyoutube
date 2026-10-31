@@ -5,7 +5,17 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 
+import android.app.AppOpsManager;
+import android.content.pm.ActivityInfo;
+import android.net.Uri;
+import android.os.Process;
+import android.view.WindowManager;
+
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.app.ActivityCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSObject;
@@ -102,9 +112,66 @@ public class MeuTubeMediaPlugin extends Plugin {
         s.width = call.getInt("width", s.width);
         s.height = call.getInt("height", s.height);
         getActivity().runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT < 26 || !getContext().getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+                call.reject("Este celular não tem pop-up de vídeo.");
+                return;
+            }
+            // Pop-up desligado para o MeuTube nas configurações do Android: abre a tela certa para ligar.
+            if (!pipAllowed()) {
+                try {
+                    getActivity().startActivity(new Intent("android.settings.PICTURE_IN_PICTURE_SETTINGS", Uri.parse("package:" + getContext().getPackageName())));
+                } catch (Exception ignored) {}
+                call.reject("O pop-up está desligado para o MeuTube. Ligue “Picture-in-picture” na tela que abriu.");
+                return;
+            }
             boolean ok = getActivity() instanceof MainActivity && ((MainActivity) getActivity()).enterPip();
             if (ok) call.resolve();
-            else call.reject("Este aparelho não tem pop-up de vídeo.");
+            else call.reject("O Android não abriu o pop-up agora. Tente de novo com o vídeo tocando.");
+        });
+    }
+
+    private boolean pipAllowed() {
+        try {
+            AppOpsManager ops = (AppOpsManager) getContext().getSystemService(android.content.Context.APP_OPS_SERVICE);
+            int mode = Build.VERSION.SDK_INT >= 29
+                    ? ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_PICTURE_IN_PICTURE, Process.myUid(), getContext().getPackageName())
+                    : ops.checkOpNoThrow(AppOpsManager.OPSTR_PICTURE_IN_PICTURE, Process.myUid(), getContext().getPackageName());
+            return mode == AppOpsManager.MODE_ALLOWED;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    // ---------- tela cheia ----------
+    // O Capacitor cancela a tela cheia pedida pela página; esta é a do próprio app: esconde as barras do Android,
+    // gira para deitado (vídeos deitados) e faz o botão voltar sair da tela cheia em vez de sair do vídeo.
+    private OnBackPressedCallback fsBack;
+
+    @PluginMethod
+    public void setFullscreen(PluginCall call) {
+        boolean on = Boolean.TRUE.equals(call.getBoolean("on", false));
+        boolean landscape = Boolean.TRUE.equals(call.getBoolean("landscape", true));
+        getActivity().runOnUiThread(() -> {
+            android.app.Activity a = getActivity();
+            WindowInsetsControllerCompat bars = WindowCompat.getInsetsController(a.getWindow(), a.getWindow().getDecorView());
+            if (on) {
+                bars.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                bars.hide(WindowInsetsCompat.Type.systemBars());
+                a.setRequestedOrientation(landscape ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+                a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (fsBack == null && a instanceof androidx.activity.ComponentActivity) {
+                    fsBack = new OnBackPressedCallback(true) {
+                        @Override public void handleOnBackPressed() { sendAction("exit-fullscreen"); }
+                    };
+                    ((androidx.activity.ComponentActivity) a).getOnBackPressedDispatcher().addCallback(fsBack);
+                }
+            } else {
+                bars.show(WindowInsetsCompat.Type.systemBars());
+                a.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (fsBack != null) { fsBack.remove(); fsBack = null; }
+            }
+            call.resolve();
         });
     }
 
