@@ -4,10 +4,14 @@
   "webDir": "www",
   "backgroundColor": "#070b12",
   "android": {
-    "allowMixedContent": false
+    "allowMixedContent": true
   },
   "plugins": {
-    "CapacitorHttp": { "enabled": true },
-    "CapacitorCookies": { "enabled": true }
+    "CapacitorHttp": {
+      "enabled": true
+    },
+    "CapacitorCookies": {
+      "enabled": true
+    }
   }
 }

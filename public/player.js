@@ -104,6 +104,9 @@ export class Player {
       this.a.preload = 'auto';
       this.a.src = this.audioSrc;
       this.v.muted = true;
+      // App de celular: o áudio fica dentro da página (no PC ele fica solto, porque o player inteiro pode ir para a
+      // janelinha do miniplayer, e mudar de página faria o som parar).
+      if (window.meutubeApp) { this.a.hidden = true; document.body.append(this.a); }
     }
     this.out.volume = vol.v;
     this.out.muted = vol.m;
@@ -514,6 +517,15 @@ export class Player {
       // Com a imagem parada (segundo plano ou modo só áudio), o tempo segue o som.
       on(a, 'timeupdate', () => { if (this.audioOnly || (v.paused && !a.paused)) this.tick(); });
       on(a, 'error', () => this.recover());
+      if (window.meutubeApp) {
+        // Diagnóstico no celular: se o som não acompanhar a imagem, mostra o motivo na tela.
+        on(a, 'error', () => this.chip(`Som com erro ${a.error?.code || ''}: ${a.error?.message || 'sem detalhes'}`.slice(0, 120)));
+        on(v, 'playing', () => setTimeout(() => {
+          if (this.destroyed || v.paused || this.audioOnly || !a.paused) return;
+          this.chip(`O som não começou (estado ${a.readyState}, rede ${a.networkState})`);
+          a.play().catch((e) => this.chip(`O som não começou: ${e.name}`));
+        }, 4000));
+      }
     }
     this.onVisible = () => {
       if (this.audioOnly || document.hidden || !a || a.paused || this.userPaused || !v.paused) return;
@@ -878,6 +890,7 @@ export class Player {
       el.pause();
       el.removeAttribute('src');
       el.load();
+      if (el === this.a) el.remove();
     }
   }
 }

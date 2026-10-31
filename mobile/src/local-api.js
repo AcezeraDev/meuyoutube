@@ -1,7 +1,7 @@
 // Roda no app antes da tela (app.js): os pedidos da tela para /api/... são respondidos aqui mesmo, no celular,
 // falando direto com o YouTube. Nada passa por computador ou servidor.
 import { createApi } from './api.js';
-import { installNative } from './native.js';
+import { installNative, mediaProxyBase } from './native.js';
 
 const webFetch = window.fetch.bind(window);
 const cap = window.Capacitor;
@@ -40,7 +40,21 @@ const storage = {
 const api = createApi({ fetch: nativeFetch, sha1, storage });
 window.meutubeApi = api;
 window.meutubeApp = true;
+document.documentElement.classList.add('app'); // estilos mais leves para o celular (veja o fim do styles.css)
 if (native) installNative();
+
+// Os arquivos de vídeo e áudio passam pelo mini-servidor do app (as lives, em HLS, vão direto).
+async function viaProxy(info) {
+  const base = await mediaProxyBase();
+  if (!base) return info;
+  const wrap = (src) => (src && src.startsWith('https://') ? base + encodeURIComponent(src) : src);
+  return {
+    ...info,
+    qualities: info.qualities.map((q) => (q.hls ? q : { ...q, src: wrap(q.src) })),
+    audio: wrap(info.audio),
+    audios: (info.audios || []).map((a) => ({ ...a, src: wrap(a.src) })),
+  };
+}
 
 window.fetch = async (input, init = {}) => {
   const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input?.url || '';
@@ -50,5 +64,6 @@ window.fetch = async (input, init = {}) => {
   let body = {};
   try { body = init.body ? JSON.parse(init.body) : {}; } catch {}
   const r = await api.handle(init.method || 'GET', u.pathname + u.search, body);
+  if (native && u.pathname === '/api/video' && r.body?.qualities) r.body = await viaProxy(r.body);
   return new Response(r.body == null ? null : JSON.stringify(r.body), { status: r.status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 };

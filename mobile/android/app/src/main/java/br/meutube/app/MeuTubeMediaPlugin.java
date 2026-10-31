@@ -100,6 +100,18 @@ public class MeuTubeMediaPlugin extends Plugin {
         call.resolve();
     }
 
+    // Endereço do mini-servidor que entrega os vídeos ao player (veja MediaProxy).
+    @PluginMethod
+    public void mediaProxy(PluginCall call) {
+        try {
+            JSObject r = new JSObject();
+            r.put("base", MediaProxy.get().base());
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Não consegui ligar o servidor de vídeo do app.");
+        }
+    }
+
     // "Entrar com Google": abre a página de login do Google e devolve os cookies do YouTube (texto do cookies.txt).
     @PluginMethod
     public void googleLogin(PluginCall call) {

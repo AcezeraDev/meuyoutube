@@ -7,6 +7,10 @@ import { registerPlugin } from '@capacitor/core';
 
 const Media = registerPlugin('MeuTubeMedia');
 
+// Endereço do mini-servidor do app que entrega os vídeos ao player em pedaços (o YouTube recusa o arquivo inteiro).
+let proxyP = null;
+export const mediaProxyBase = () => (proxyP ||= Media.mediaProxy().then((r) => r.base).catch(() => { proxyP = null; return ''; }));
+
 export function installNative() {
   // "Entrar com Google": a página de login abre no Android e volta com o texto do cookies.txt.
   window.meutubeNative = { googleLogin: () => Media.googleLogin().then((r) => r.cookies) };

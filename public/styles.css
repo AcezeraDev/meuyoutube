@@ -1318,3 +1318,17 @@ body.native-pip .player { position: fixed !important; inset: 0 !important; width
 body.native-pip .player.in-pip::after,
 body.native-pip .player > :not(video) { display: none !important; }
 body.native-pip .player video { object-fit: contain; }
+
+/* App Android: rolagem leve. Desfoques (backdrop-filter, blur) e o fundo animado são caros para o celular redesenhar
+   a cada quadro da rolagem; no app eles viram cores sólidas, e os cards aparecem já prontos. */
+html.app .aurora,
+html.app .ambient { display: none !important; }
+html.app body { background: radial-gradient(120% 60% at 20% -10%, rgba(47, 140, 255, 0.14), transparent 60%), var(--bg, #070b12); }
+html.app *, html.app *::before, html.app *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+html.app .masthead { background: rgba(7, 11, 18, 0.97); }
+html.app .bottom { background: rgba(7, 11, 18, 0.98); }
+html.app .thumb-wrap { will-change: auto; }
+html.app .rv { opacity: 1; transform: none; }
+html.app .rv.in { transition: none; }
+html.app { -webkit-tap-highlight-color: transparent; }
+html.app .enter { animation: rise 0.35s var(--out) both; animation-delay: 0ms; }
