@@ -493,6 +493,26 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
       if (!m) return fail(400, 'Cole o link de uma playlist do YouTube (com “list=” no endereço).');
       return ok(await ytPlaylist(m[1]));
     }
+    if (p === '/api/shorts') {
+      const pg = page(40);
+      return ok(await cached(`sh:${pg}:${loggedIn() ? 1 : 0}`, 10 * MIN, () => ytw.shortsFeed(innertube, loggedIn(), pg)));
+    }
+    if (p === '/api/vstate') {
+      if (!VIDEO_ID.test(q('id'))) return fail(400, 'Vídeo inválido.');
+      if (!loggedIn()) return ok({ like: 'INDIFFERENT', subscribed: false, loggedIn: false });
+      return ok({ ...(await ytw.videoState(innertube, q('id'))), loggedIn: true });
+    }
+    if ((p === '/api/rate' || p === '/api/subscribe') && method === 'POST') {
+      if (!loggedIn()) return fail(401, 'Conecte sua conta do YouTube para isso.');
+      if (p === '/api/rate') {
+        if (!VIDEO_ID.test(b.id || '')) return fail(400, 'Vídeo inválido.');
+        return ok(await ytw.rate(innertube, b.id, String(b.status || '')));
+      }
+      if (!CHANNEL_ID.test(b.channelId || '')) return fail(400, 'Canal inválido.');
+      const r = await ytw.subscribe(innertube, b.channelId, Boolean(b.on));
+      clearFeeds(); // inscrições e canais mudaram
+      return ok(r);
+    }
     if (p === '/api/live-now') return ok(await liveNow(ids(u, CHANNEL_ID, 12)));
     if (p === '/api/avatars') return ok({});
     if (p === '/api/prefetch') return { status: 204, body: null };

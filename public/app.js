@@ -118,10 +118,15 @@ async function loadAccount() {
 }
 // Botão de conta no topo: sua foto do YouTube quando conectado; o ícone padrão quando não.
 const ME_ICON = $('.me svg')?.outerHTML || '';
+let meInfo = {}; // nome, @ e foto da conta do YouTube conectada
 async function renderMe() {
   const btn = $('.me');
   if (!btn) return;
   const me = account.connected ? await fetch('/api/account/me').then((r) => r.json()).catch(() => ({})) : {};
+  const changed = (me.photo || '') !== (meInfo.photo || '');
+  meInfo = me;
+  if (changed) renderGuide();
+  if (changed && account.connected && location.hash === '#/account') accountView();
   const label = me.name ? `Conta do YouTube: ${me.name}${me.handle ? ` (${me.handle})` : ''}` : 'Conta do YouTube';
   btn.setAttribute('aria-label', label);
   btn.title = label;
@@ -155,7 +160,7 @@ const later = () => store.get('later', []);
 const subs = () => store.get('subs', []);
 const progress = () => store.get('progress', {});
 const isLater = (id) => later().some((x) => x.id === id);
-const isSub = (cid) => subs().some((x) => x.id === cid);
+const isSub = (cid) => subs().some((x) => x.id === cid) || accountChannels.some((x) => x.id === cid);
 
 function toggleLater(id) {
   const list = later();
@@ -328,9 +333,11 @@ const failure = (e) => e.code === 'bot'
 // ---------- menu lateral ----------
 const NAV = [
   { id: 'home', href: '#/', label: 'Início', ic: 'home' },
+  { id: 'shorts', href: '#/shorts', label: 'Shorts', ic: 'zap' },
   { id: 'subs', href: '#/subs', label: 'Inscrições', ic: 'subs' },
 ];
 const YOU = [
+  { id: 'library', href: '#/library', label: 'Meus vídeos', ic: 'film' },
   { id: 'history', href: '#/history', label: 'Histórico', ic: 'history' },
   { id: 'later', href: '#/later', label: 'Assistir mais tarde', ic: 'clock' },
   { id: 'playlists', href: '#/playlists', label: 'Playlists', ic: 'playlist' },
@@ -356,7 +363,9 @@ function renderGuide() {
     <div class="g-section"><h3 class="g-title">Só no MeuTube</h3>${EXTRA.map(navItem).join('')}</div>
     ${s.length ? `<div class="g-section"><h3 class="g-title">Inscrições</h3>${s.map((c) => `<a class="g-item g-ch rpl" data-nav="ch-${c.id}" href="#/channel/${c.id}">${avatar(c.name, c.avatar, 'xs', c.id)}<span>${esc(c.name)}</span>${liveChannels.has(c.id) ? '<i class="g-live" title="Ao vivo agora"></i>' : ''}</a>`).join('')}</div>` : ''}
     <p class="g-foot">Sem anúncios. ${account.connected ? 'Conta do YouTube conectada.' : 'Inscrições, histórico e “assistir mais tarde” ficam salvos só neste navegador.'}</p>`;
-  const mini = [...NAV, YOU[2], YOU[1], YOU[0]].map((n) => `<a class="m-item rpl" data-nav="${n.id}" href="${n.href}">${icon(n.ic, 22)}<span>${n.label === 'Assistir mais tarde' ? 'Mais tarde' : n.label}</span></a>`).join('');
+  // Barra de baixo (celular) e atalhos da lateral: Início, Shorts, Inscrições, Meus vídeos e Mim (sua conta).
+  const me = { id: 'account', href: '#/account', label: 'Mim', ic: 'user' };
+  const mini = [...NAV, YOU[0], me].map((n) => `<a class="m-item rpl" data-nav="${n.id}" href="${n.href}">${n.id === 'account' && meInfo.photo ? `<img class="m-photo" src="${esc(meInfo.photo)}" alt="">` : icon(n.ic, 22)}<span>${n.label}</span></a>`).join('');
   $('#mini').innerHTML = mini;
   $('#bottom').innerHTML = mini;
   markNav();
@@ -421,6 +430,8 @@ function restoreScroll(y) {
 
 function route() {
   const t = ++token;
+  const prevHash = lastHash;
+  stopShorts();
   scrollPos.set(lastHash, scrollY);
   lastHash = location.hash;
   const restore = fromPop ? scrollPos.get(location.hash) : 0;
@@ -429,11 +440,14 @@ function route() {
   const h = location.hash.slice(1) || '/';
   // Vídeo no miniplayer continua tocando enquanto você navega; abrir outro vídeo substitui o que estava nele.
   const watchId = h.match(/^\/watch\/([\w-]{11})/)?.[1];
-  if (player?.pipWin) { mini?.destroy(); mini = player; mini.opts.onEnded = mini.opts.onNext = null; }
+  if (player?.pipWin) { closeMini(); mini = player; mini.opts.onEnded = mini.opts.onNext = null; }
+  // Saiu da página do vídeo: ele continua tocando no miniplayer de baixo (como no app do YouTube).
+  else if (player && watchId !== player.info.id && !player.v.ended && !h.startsWith('/shorts')) { closeMini(); mini = player; mini.opts.onEnded = mini.opts.onNext = null; showMiniBar(mini, prevHash); }
   else player?.destroy();
   player = null;
-  if (mini && watchId && watchId !== mini.info.id) { mini.destroy(); mini = null; }
+  if (mini && ((watchId && watchId !== mini.info.id) || h.startsWith('/shorts'))) closeMini();
   body.classList.toggle('watching', h.startsWith('/watch/'));
+  body.classList.toggle('shorts-mode', h.startsWith('/shorts'));
   body.classList.remove('drawer-open');
   layout();
   markNav();
@@ -448,11 +462,251 @@ function route() {
   if ((m = h.match(/^\/search\/(.+)$/))) return searchView(decodeURIComponent(m[1]), t);
   if ((m = h.match(/^\/channel\/(UC[\w-]{22})/))) return channelView(m[1], t);
   if (h === '/subs') return subsView(t);
+  if (h === '/shorts') return shortsView(t);
+  if (h === '/library') return libraryView(t);
   if (h === '/later') return laterView(t);
   if (h === '/history') return historyView(t);
   if (h === '/liked') return likedView(t);
   if (h === '/account') return accountView();
   return homeView(t);
+}
+
+// ---------- miniplayer de baixo ----------
+// Ao sair da página do vídeo, o próprio player encolhe numa barrinha acima do menu e segue tocando; tocar nela
+// volta para o vídeo, sem recomeçar. O vídeo é movido de lugar na página (não é recriado), então não para.
+let miniTimer = 0;
+function showMiniBar(p, hash) {
+  const bar = $('#minibar');
+  if (!bar) return;
+  bar.innerHTML = `<div class="mb-video" data-mb-open></div>
+    <button class="mb-info rpl" data-mb-open><b>${esc(p.info.title)}</b><span>${esc(p.info.channel)}</span></button>
+    <button class="mb-btn rpl" data-mb-toggle aria-label="Pausar">${icon('pause', 22)}</button>
+    <button class="mb-btn rpl" data-mb-close aria-label="Fechar">${icon('x', 22)}</button>`;
+  bar.dataset.hash = /^#\/watch\//.test(hash) ? hash : `#/watch/${p.info.id}`;
+  p.root.classList.add('in-mini');
+  bar.querySelector('.mb-video').append(p.root);
+  bar.hidden = false;
+  body.classList.add('has-minibar');
+  renderMiniBar();
+  clearInterval(miniTimer);
+  miniTimer = setInterval(renderMiniBar, 800);
+}
+function renderMiniBar() {
+  const b = $('[data-mb-toggle]');
+  if (!b || !mini) return;
+  const playing = mini.playing && !mini.v.ended;
+  if (b.dataset.on === String(playing)) return;
+  b.dataset.on = String(playing);
+  b.innerHTML = icon(playing ? 'pause' : 'play', 22);
+  b.setAttribute('aria-label', playing ? 'Pausar' : 'Tocar');
+}
+function hideMiniBar() {
+  const bar = $('#minibar');
+  clearInterval(miniTimer);
+  body.classList.remove('has-minibar');
+  if (!bar) return;
+  bar.hidden = true;
+  bar.innerHTML = '';
+}
+function closeMini() {
+  if (!mini) return;
+  mini.destroy();
+  mini = null;
+  hideMiniBar();
+}
+$('#minibar')?.addEventListener('click', (e) => {
+  if (e.target.closest('[data-mb-close]')) return closeMini();
+  if (e.target.closest('[data-mb-toggle]')) { mini?.toggle(); return renderMiniBar(); }
+  if (e.target.closest('[data-mb-open]') && mini) go($('#minibar').dataset.hash);
+});
+
+// ---------- Meus vídeos ----------
+// Tudo seu num lugar só: histórico, playlists (assistir mais tarde, curtidos e as suas) e atalhos.
+function libTile(href, ic, title, sub, thumb) {
+  return `<a class="lib-tile rpl" href="${href}">
+    <span class="lib-cover">${thumb ? `<img src="${esc(thumb)}" alt="" loading="lazy">` : ''}<span class="lib-ic">${icon(ic, 26)}</span></span>
+    <b>${esc(title)}</b>${sub ? `<span class="meta xs">${esc(sub)}</span>` : ''}</a>`;
+}
+const libLink = (href, ic, title, sub = '') => `<a class="lib-link rpl" href="${href}">${icon(ic, 22)}<span><b>${esc(title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>${icon('chevron', 18)}</a>`;
+const nVideos = (n) => `${n} ${n === 1 ? 'vídeo' : 'vídeos'}`;
+function libraryView(t) {
+  document.title = 'Meus vídeos - MeuTube';
+  const hist = store.get('history', []).slice(0, 12);
+  const lt = later();
+  const pls = lib.playlists();
+  app.innerHTML = `<section class="view library">
+    <h2 class="lib-title enter">Meus vídeos</h2>
+    <div class="lib-sec">
+      <div class="lib-head"><h3>Histórico</h3><a class="rpl" href="#/history">Ver tudo</a></div>
+      <div id="lib-hist">${hist.length ? rail(hist) : '<p class="meta sm">Os vídeos que você assistir aparecem aqui.</p>'}</div>
+    </div>
+    <div class="lib-sec">
+      <div class="lib-head"><h3>Playlists</h3><a class="rpl" href="#/playlists">Ver tudo</a></div>
+      <div class="lib-tiles">
+        ${libTile('#/later', 'clock', 'Assistir mais tarde', nVideos(lt.length), lt[0] && thumbUrl(lt[0]))}
+        ${account.connected ? libTile('#/liked', 'like', 'Vídeos com “Gostei”', 'da sua conta', '') : ''}
+        ${pls.map((p) => libTile(`#/playlist/${p.id}`, 'playlist', p.name, nVideos(p.items.length), p.items[0] && thumbUrl(p.items[0]))).join('')}
+        ${libTile('#/playlists', 'listPlus', 'Nova playlist', '', '')}
+      </div>
+    </div>
+    <nav class="lib-links" aria-label="Seus vídeos">
+      ${libLink('#/subs', 'subs', 'Inscrições', `${allChannels().length} canais`)}
+      ${libLink('#/history', 'history', 'Histórico')}
+      ${libLink('#/later', 'clock', 'Assistir mais tarde', 'Salve vídeos para ver depois')}
+      ${account.connected ? libLink('#/liked', 'heart', 'Vídeos curtidos') : ''}
+      ${libLink('#/playlists', 'playlist', 'Playlists', `${pls.length} ${pls.length === 1 ? 'playlist' : 'playlists'}`)}
+      ${libLink('#/stats', 'chart', 'Suas estatísticas')}
+    </nav>
+  </section>`;
+  // Com a conta conectada, o histórico vem do YouTube (inclui o que você viu em outros aparelhos).
+  if (account.connected) {
+    api('/api/feed?k=history').then((r) => {
+      if (t !== token || !r.items?.length) return;
+      remember(r.items);
+      $('#lib-hist').innerHTML = rail(r.items.slice(0, 12));
+    }).catch(() => {});
+  }
+}
+
+// ---------- Shorts ----------
+// Vídeos em pé, um por tela, passando com o dedo. Só o Short que está na tela toca (imagem e som separados,
+// como no player principal, em loop).
+let shortsCtl = null;
+function stopShorts() {
+  shortsCtl?.stop();
+  shortsCtl = null;
+}
+const shortCard = (s) => `<article class="short" data-short="${s.id}">
+  <div class="sh-stage">
+    <img class="sh-poster" src="${esc(s.thumb || `https://i.ytimg.com/vi/${s.id}/oardefault.jpg`)}" alt="" loading="lazy">
+    <div class="sh-tap" data-sh-toggle aria-hidden="true"></div>
+    <span class="sh-state" aria-hidden="true">${icon('play', 40)}</span>
+    <div class="sh-meta"><a class="sh-ch" href="#/watch/${s.id}"></a><p>${esc(s.title)}</p><span class="meta xs">${esc(s.viewsText || '')}</span></div>
+    <div class="sh-side">
+      <button class="sh-btn rpl" data-sh-like aria-pressed="false" aria-label="Gostei">${icon('like', 26)}<span>Gostei</span></button>
+      <a class="sh-btn rpl" href="#/watch/${s.id}" aria-label="Comentários">${icon('chat', 26)}<span>Comentar</span></a>
+      <button class="sh-btn rpl" data-share="${s.id}" aria-label="Compartilhar">${icon('share', 26)}<span>Partilhar</span></button>
+    </div>
+  </div>
+</article>`;
+function shortsView(t) {
+  document.title = 'Shorts - MeuTube';
+  app.innerHTML = `<section class="shorts" id="shorts" aria-label="Shorts"><div class="sh-end" id="sh-more"><span class="btn-spin"></span></div></section>`;
+  const box = $('#shorts');
+  const seen = new Set();
+  let page = 0, busy = false, done = false, cur = null, v = null, a = null, stopped = false;
+
+  async function more() {
+    if (busy || done) return;
+    busy = true;
+    try {
+      const r = await api('/api/shorts?page=' + page);
+      if (t !== token) return;
+      page++;
+      const fresh = r.items.filter((x) => !seen.has(x.id) && !lib.isBlocked(x));
+      fresh.forEach((x) => seen.add(x.id));
+      $('#sh-more').insertAdjacentHTML('beforebegin', fresh.map(shortCard).join(''));
+      $$('.short:not([data-obs])', box).forEach((el) => { el.dataset.obs = '1'; io.observe(el); });
+      if (!r.more) { done = true; $('#sh-more').innerHTML = '<p class="meta">Você viu todos por agora.</p>'; }
+    } catch (e) {
+      $('#sh-more').innerHTML = failure(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Para o Short anterior e toca o que está na tela.
+  function release() {
+    for (const m of [v, a]) { if (!m) continue; m.pause(); m.removeAttribute('src'); m.load(); m.remove(); }
+    v = a = null;
+    cur?.classList.remove('playing', 'paused');
+  }
+  async function activate(el) {
+    if (el === cur || stopped) return;
+    release();
+    cur = el;
+    const id = el.dataset.short;
+    const all = $$('.short', box);
+    if (all.indexOf(el) >= all.length - 3) more();
+    mini?.pause();
+    let info;
+    try { info = await api('/api/video?id=' + id); } catch (e) { if (cur === el) toast(e.message); return; }
+    if (cur !== el || stopped) return;
+    el.querySelector('.sh-ch').textContent = info.channel || '';
+    if (account.connected) {
+      fetch('/api/vstate?id=' + id).then((r) => r.json()).then((st) => { if (st.like) setLike(el, st.like === 'LIKE'); }).catch(() => {});
+    }
+    // Qualidade: a melhor até 1280 de altura (Shorts são em pé: 720 x 1280).
+    const q = info.qualities.find((x) => x.height <= 1280) || info.qualities[info.qualities.length - 1];
+    if (!q) return;
+    v = document.createElement('video');
+    v.playsInline = true;
+    v.loop = true;
+    v.preload = 'auto';
+    v.className = 'sh-video';
+    v.src = q.src;
+    if (info.audio) {
+      const snd = (a = new Audio(info.audio));
+      snd.loop = true;
+      v.muted = true;
+      if (window.meutubeApp) { snd.hidden = true; document.body.append(snd); }
+      const vid = v; // este Short (v muda quando você passa para o próximo)
+      vid.addEventListener('playing', () => { snd.currentTime = vid.currentTime; snd.play().catch(() => {}); });
+      vid.addEventListener('waiting', () => snd.pause());
+      vid.addEventListener('pause', () => snd.pause());
+      vid.addEventListener('timeupdate', () => { if (Math.abs(snd.currentTime - vid.currentTime) > 0.4) snd.currentTime = vid.currentTime; });
+    }
+    el.querySelector('.sh-poster').after(v);
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: info.title, artist: info.channel, artwork: [{ src: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, sizes: '480x360', type: 'image/jpeg' }] });
+      navigator.mediaSession.setActionHandler('play', () => toggle(true));
+      navigator.mediaSession.setActionHandler('pause', () => toggle(false));
+    }
+    v.play().then(() => el.classList.add('playing')).catch(() => el.classList.add('paused'));
+  }
+  function toggle(force) {
+    if (!v || !cur) return;
+    const play = force ?? v.paused;
+    if (play) v.play().catch(() => {}); else v.pause();
+    cur.classList.toggle('paused', !play);
+    cur.classList.toggle('playing', play);
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = play ? 'playing' : 'paused';
+  }
+  function setLike(el, on) {
+    const b = el.querySelector('[data-sh-like]');
+    b.setAttribute('aria-pressed', String(on));
+    b.classList.toggle('on', on);
+  }
+
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) activate(e.target);
+  }, { root: box, threshold: 0.6 });
+  const onClick = (e) => {
+    const el = e.target.closest('.short');
+    if (!el) return;
+    if (e.target.closest('[data-sh-toggle]')) { if (el === cur) toggle(); return; }
+    const like = e.target.closest('[data-sh-like]');
+    if (like) {
+      if (!account.connected) return toast('Conecte sua conta do YouTube (em Mim) para curtir.');
+      const on = like.getAttribute('aria-pressed') !== 'true';
+      setLike(el, on);
+      send('/api/rate', { id: el.dataset.short, status: on ? 'LIKE' : 'INDIFFERENT' }).catch((err) => { setLike(el, !on); toast(err.message); });
+    }
+  };
+  // Saiu do app ou apagou a tela: o Short pausa (para ouvir em segundo plano, abra o vídeo normal).
+  const onHide = () => { if (document.hidden) toggle(false); };
+  box.addEventListener('click', onClick);
+  document.addEventListener('visibilitychange', onHide);
+  shortsCtl = {
+    stop() {
+      stopped = true;
+      io.disconnect();
+      document.removeEventListener('visibilitychange', onHide);
+      release();
+      if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
+    },
+  };
+  more();
 }
 
 // ---------- telas ----------
@@ -713,7 +967,14 @@ async function watchView(id, t, listId) {
       ${info.channelId ? subButton(ch) : ''}
     </div>
     <div class="w-actions">
-      <span class="pill votes" id="w-votes" title="Gostei / Não gostei">${icon('like', 20)}${info.likes ? nf.format(info.likes) : '—'}</span>
+      <span class="pill votes rate" id="w-votes" data-like="INDIFFERENT">
+        <button class="rate-btn rpl" data-rate="LIKE" aria-pressed="false" title="Gostei">${icon('like', 20)}<b id="w-likes">${info.likes ? nf.format(info.likes) : 'Gostei'}</b></button>
+        <i class="v-sep"></i>
+        <button class="rate-btn rpl" data-rate="DISLIKE" aria-pressed="false" title="Não gostei">${icon('dislike', 20)}<b id="w-dislikes"></b></button>
+        <span class="v-bar" hidden><i></i></span>
+      </span>
+      ${info.live ? '' : `<button class="pill rpl" data-bg aria-pressed="false">${icon('headphones', 20)}<span>Ouvir em segundo plano</span></button>`}
+      <button class="pill rpl" data-goto-comments>${icon('chat', 20)}Comentários</button>
       <button class="pill rpl" data-save="${id}">${icon('listPlus', 20)}Salvar</button>
       <button class="pill rpl" data-mark title="Guarda o momento atual do vídeo com uma nota">${icon('bookmark', 20)}Marcar momento</button>
       <button class="pill rpl" data-share="${id}">${icon('share', 20)}Compartilhar</button>
@@ -771,7 +1032,11 @@ async function watchView(id, t, listId) {
       player = mini;
       mini = null;
       Object.assign(player.opts, { onNext: next, onEnded: () => { if (pl || $('#autoplay')?.checked) next(); } });
-      player.dock(el);
+      if (player.root.classList.contains('in-mini')) {
+        el.replaceWith(player.root);
+        player.root.classList.remove('in-mini');
+        hideMiniBar();
+      } else player.dock(el);
     } else player = new Player(el, info, {
       onPipBack: () => { if (mini?.info.id === id) go(`#/watch/${id}${pl ? `?list=${pl.id}` : ''}`); else player?.exitPip(); },
       onPipClosed: () => { if (mini?.info.id === id) { mini.destroy(); mini = null; } },
@@ -805,17 +1070,54 @@ async function watchView(id, t, listId) {
     const n = pl && queueNext(pl, id);
     if (n && !queueMode().shuffle) fetch('/api/prefetch?id=' + n.id).catch(() => {});
   }
+  const box = $('#w-votes');
+  box.dataset.likes = info.likes || 0;
   if (cfg.dislikes) {
     api('/api/votes?id=' + id).then((vt) => {
       if (t !== token || !vt) return;
-      const likes = info.likes || vt.likes;
-      const total = likes + vt.dislikes;
-      $('#w-votes').outerHTML = `<span class="pill votes" id="w-votes" title="“Não gostei” estimado pelo Return YouTube Dislike">
-        ${icon('like', 20)}${nf.format(likes)}<i class="v-sep"></i>${icon('dislike', 20)}${nf.format(vt.dislikes)}
-        <span class="v-bar"><i style="width:${total ? (likes / total) * 100 : 100}%"></i></span></span>`;
+      box.dataset.likes = info.likes || vt.likes;
+      box.dataset.dislikes = vt.dislikes;
+      box.title = '“Não gostei” estimado pelo Return YouTube Dislike';
+      renderVotes();
+    }).catch(() => {});
+  }
+  // Sua conta neste vídeo: se você já curtiu e se é inscrita no canal (o botão de inscrição passa a ser o do YouTube).
+  if (account.connected) {
+    fetch('/api/vstate?id=' + id).then((r) => r.json()).then((st) => {
+      if (t !== token || !st.loggedIn) return;
+      box.dataset.like = st.like;
+      renderVotes();
+      if (st.channelId && st.subscribed !== isSub(st.channelId)) {
+        accountChannels = st.subscribed ? [...accountChannels, { id: st.channelId, name: info.channel, avatar: ch.avatar }] : accountChannels.filter((c) => c.id !== st.channelId);
+        refreshSubButtons({ id: st.channelId, name: info.channel, avatar: ch.avatar });
+      }
     }).catch(() => {});
   }
   related = await loadRelated(info, t);
+}
+
+// Desenha os números e o estado de "Gostei / Não gostei" a partir do que está guardado no próprio elemento.
+function renderVotes() {
+  const box = $('#w-votes');
+  if (!box) return;
+  const like = box.dataset.like;
+  const likes = Number(box.dataset.likes) || 0;
+  const dislikes = box.dataset.dislikes == null ? null : Number(box.dataset.dislikes) || 0;
+  box.querySelector('[data-rate="LIKE"]').setAttribute('aria-pressed', String(like === 'LIKE'));
+  box.querySelector('[data-rate="DISLIKE"]').setAttribute('aria-pressed', String(like === 'DISLIKE'));
+  $('#w-likes').textContent = likes ? nf.format(likes) : 'Gostei';
+  $('#w-dislikes').textContent = dislikes == null ? '' : nf.format(dislikes);
+  const bar = box.querySelector('.v-bar');
+  bar.hidden = dislikes == null;
+  if (dislikes != null) bar.firstElementChild.style.width = `${likes + dislikes ? (likes / (likes + dislikes)) * 100 : 100}%`;
+}
+function refreshSubButtons(c) {
+  const on = isSub(c.id);
+  $$(`[data-sub="${c.id}"].sub-btn`).forEach((b) => {
+    const lg = b.classList.contains('lg') ? 'lg' : '';
+    b.outerHTML = subButton(c, `${lg}`);
+  });
+  return on;
 }
 
 async function loadRelated(info, t) {
@@ -1419,13 +1721,21 @@ function accountView() {
         ? `${account.mode === 'google' ? 'Conectada com a <strong>sua conta Google</strong>' : account.mode === 'file' ? 'Conectada pelo <strong>arquivo de login</strong>' : `Conectada pelo <strong>${BROWSER_NAMES[account.browser] || account.browser}</strong>`}${account.profile ? ` (perfil ${esc(account.profile)})` : ''}. Suas recomendações, inscrições, histórico, “assistir mais tarde” e curtidos já aparecem aqui, sem anúncios.`
         : 'Traga suas recomendações, inscrições, histórico, “assistir mais tarde” e vídeos curtidos. De quebra, o YouTube para de pedir a verificação anti-robô.'}</p>
       ${c ? `
+        <div class="acc-profile" id="acc-profile">${meInfo.photo ? `<img src="${esc(meInfo.photo)}" alt="">` : `<span class="acc-photo-ph">${icon('user', 30)}</span>`}
+          <div><b>${esc(meInfo.name || 'Sua conta do YouTube')}</b>${meInfo.handle ? `<span class="meta sm">${esc(meInfo.handle)}</span>` : ''}</div></div>
         <div class="acc-links">
           <a class="pill rpl" href="#/">${icon('sparkles', 18)}Para você</a>
           <a class="pill rpl" href="#/subs">${icon('subs', 18)}Inscrições</a>
           <a class="pill rpl" href="#/liked">${icon('heart', 18)}Curtidos</a>
           <a class="pill rpl" href="#/history">${icon('history', 18)}Histórico</a>
         </div>
-        <button class="pill rpl acc-out" data-disconnect>${icon('logout', 18)}Desconectar</button>`
+        <nav class="lib-links acc-menu" aria-label="Conta">
+          ${libLink('#/library', 'film', 'Meus vídeos')}
+          ${libLink('#/settings', 'sliders', 'Ajustes')}
+          ${libLink('#/stats', 'chart', 'Suas estatísticas')}
+          <button class="lib-link rpl" data-switch-account>${icon('repeat', 22)}<span><b>Trocar de conta</b></span>${icon('chevron', 18)}</button>
+          <button class="lib-link rpl danger" data-disconnect>${icon('logout', 22)}<span><b>Sair</b><small>Desconecta a conta deste ${IN_APP ? 'celular' : 'computador'}</small></span>${icon('chevron', 18)}</button>
+        </nav>`
       : accMethod() === 'google' ? googleMethod() : accMethod() === 'file' ? fileMethod() : `${methodSwitch()}
         <ol class="acc-steps">
           <li><span>1</span><div>Abra o <strong>youtube.com</strong> no navegador e entre na sua conta (se ainda não estiver).</div></li>
@@ -1844,7 +2154,7 @@ document.addEventListener('pointerdown', (e) => {
 // ---------- eventos ----------
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.dl-wrap')) closeDlMenus();
-  const el = e.target.closest('[data-later], [data-sub], [data-chip], [data-filter], [data-seek], [data-clear], [data-share], [data-menu], [data-scrim], [data-dl-toggle], [data-dl], [data-dl-cancel], [data-src], [data-browser], [data-connect], [data-disconnect], [data-retry-now], [data-method], [data-google-start], [data-google-done], [data-google-cancel], #desc, a[href^="#/"]');
+  const el = e.target.closest('[data-later], [data-sub], [data-chip], [data-filter], [data-seek], [data-clear], [data-share], [data-menu], [data-scrim], [data-dl-toggle], [data-dl], [data-dl-cancel], [data-src], [data-browser], [data-connect], [data-disconnect], [data-retry-now], [data-method], [data-google-start], [data-google-done], [data-google-cancel], [data-rate], [data-bg], [data-goto-comments], [data-switch-account], #desc, a[href^="#/"]');
   if (!el) return;
 
   if (el.hasAttribute('data-dl-toggle')) {
@@ -1920,6 +2230,49 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (el.hasAttribute('data-connect')) return connectAccount(el);
+  if (el.dataset.rate) {
+    if (!account.connected) return toast('Conecte sua conta do YouTube (em Mim) para curtir.');
+    const box = $('#w-votes');
+    const id = location.hash.match(/watch\/([\w-]{11})/)?.[1];
+    if (!box || !id) return;
+    const before = { like: box.dataset.like, likes: box.dataset.likes, dislikes: box.dataset.dislikes };
+    const next = before.like === el.dataset.rate ? 'INDIFFERENT' : el.dataset.rate;
+    // Mostra na hora; se o YouTube recusar, volta como estava.
+    const bump = (k, d) => { if (box.dataset[k] != null) box.dataset[k] = Math.max(0, Number(box.dataset[k]) + d); };
+    if (before.like === 'LIKE') bump('likes', -1);
+    if (before.like === 'DISLIKE') bump('dislikes', -1);
+    if (next === 'LIKE') bump('likes', 1);
+    if (next === 'DISLIKE') bump('dislikes', 1);
+    box.dataset.like = next;
+    renderVotes();
+    if (next === 'LIKE') burst(el, 14);
+    send('/api/rate', { id, status: next })
+      .then(() => toast(next === 'LIKE' ? 'Adicionado aos vídeos com “Gostei”' : next === 'DISLIKE' ? 'Você não gostou deste vídeo' : 'Avaliação removida'))
+      .catch((err) => { Object.assign(box.dataset, before); renderVotes(); toast(err.message); });
+    return;
+  }
+  if (el.hasAttribute('data-bg')) {
+    if (!player) return;
+    const on = !player.audioOnly;
+    player.setAudioOnly(on, false);
+    el.setAttribute('aria-pressed', String(on));
+    el.querySelector('span').textContent = on ? 'Voltar para o vídeo' : 'Ouvir em segundo plano';
+    toast(on ? (IN_APP ? 'Só o som: pode sair do app ou apagar a tela' : 'Só o som, economizando dados') : 'Vídeo de volta');
+    return;
+  }
+  if (el.hasAttribute('data-goto-comments')) {
+    $('#w-comments')?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+    return;
+  }
+  if (el.hasAttribute('data-switch-account')) {
+    // Trocar de conta: sai desta e já abre a entrada de novo (no app, a página do Google).
+    send('/api/account', null, 'DELETE').then(async () => {
+      await loadAccount();
+      accountView();
+      if (IN_APP) $('[data-google-start]')?.click();
+    }).catch((err) => toast(err.message));
+    return;
+  }
   if (el.hasAttribute('data-disconnect')) {
     send('/api/account', null, 'DELETE').then(async () => { await loadAccount(); toast('Conta desconectada'); accountView(); }).catch((err) => toast(err.message));
     return;
@@ -1936,6 +2289,19 @@ document.addEventListener('click', (e) => {
     el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
     toast(on ? 'Salvo em Assistir mais tarde' : 'Removido de Assistir mais tarde');
     if (location.hash === '#/later' && !on) el.closest('.row-card')?.remove();
+    return;
+  }
+  if (el.dataset.sub && account.connected && !subs().some((x) => x.id === el.dataset.sub)) {
+    // Conta conectada: a inscrição vai para a sua conta do YouTube.
+    const c = { id: el.dataset.sub, name: el.dataset.name, avatar: el.dataset.avatar };
+    const on = !accountChannels.some((x) => x.id === c.id);
+    const before = accountChannels;
+    accountChannels = on ? [...accountChannels, c] : accountChannels.filter((x) => x.id !== c.id);
+    refreshSubButtons(c);
+    if (on) burst($(`[data-sub="${c.id}"].sub-btn`));
+    send('/api/subscribe', { channelId: c.id, on })
+      .then(() => { toast(on ? `Inscrita em ${c.name}` : 'Inscrição cancelada'); renderGuide(); })
+      .catch((err) => { accountChannels = before; refreshSubButtons(c); toast(err.message); });
     return;
   }
   if (el.dataset.sub) {

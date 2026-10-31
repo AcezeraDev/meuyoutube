@@ -899,6 +899,30 @@ http.createServer(async (req, res) => {
       if (!text || !b.params) return json(res, 400, { error: 'Escreva uma mensagem.' });
       return json(res, 200, await yt.sendChat(innertube, String(b.params).slice(0, 4000), text, crypto.randomUUID()));
     }
+    // Shorts (vídeos em pé), em páginas.
+    if (u.pathname === '/api/shorts') {
+      const page = Math.min(40, Math.max(0, Number(u.searchParams.get('page')) || 0));
+      return json(res, 200, await cached(`sh:${page}:${loggedIn() ? 1 : 0}`, 10 * 60e3, () => yt.shortsFeed(innertube, loggedIn(), page)));
+    }
+    // Sua conta neste vídeo (curtida e inscrição) e as ações de curtir e se inscrever no YouTube.
+    if (u.pathname === '/api/vstate') {
+      const id = u.searchParams.get('id') || '';
+      if (!VIDEO_ID.test(id)) return json(res, 400, { error: 'Vídeo inválido.' });
+      if (!loggedIn()) return json(res, 200, { like: 'INDIFFERENT', subscribed: false, loggedIn: false });
+      return json(res, 200, { ...(await yt.videoState(innertube, id)), loggedIn: true });
+    }
+    if ((u.pathname === '/api/rate' || u.pathname === '/api/subscribe') && req.method === 'POST') {
+      if (!loggedIn()) return json(res, 401, { error: 'Conecte sua conta do YouTube para isso.' });
+      const b = await readBody(req);
+      if (u.pathname === '/api/rate') {
+        if (!VIDEO_ID.test(b.id || '')) return json(res, 400, { error: 'Vídeo inválido.' });
+        return json(res, 200, await yt.rate(innertube, b.id, String(b.status || '')));
+      }
+      if (!CHANNEL_ID.test(b.channelId || '')) return json(res, 400, { error: 'Canal inválido.' });
+      const r = await yt.subscribe(innertube, b.channelId, Boolean(b.on));
+      for (const k of cache.keys()) if (k.startsWith('f:')) cache.delete(k); // inscrições e canais mudaram
+      return json(res, 200, r);
+    }
     if (u.pathname === '/api/video') {
       const id = u.searchParams.get('id') || '';
       if (!VIDEO_ID.test(id)) return json(res, 400, { error: 'Vídeo inválido.' });
