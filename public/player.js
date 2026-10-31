@@ -132,9 +132,24 @@ export class Player {
     if (this.destroyed) return;
     if (!Hls?.isSupported()) { this.v.src = src; return; } // Safari e celulares tocam HLS sozinhos
     this.hls?.destroy();
-    const hls = (this.hls = new Hls({ liveSyncDurationCount: 3, backBufferLength: 90, maxBufferLength: 30 }));
+    // Qualidade automática mais firme: começa supondo uma internet boa (o padrão do hls.js supõe 0,5 Mbps e abre a
+    // live em baixa), sobe de qualidade mais rápido e guarda um pouco mais de folga, para um pedaço que atrasa não
+    // derrubar a imagem na hora.
+    const hls = (this.hls = new Hls({
+      liveSyncDurationCount: 4, backBufferLength: 90, maxBufferLength: 30,
+      abrEwmaDefaultEstimate: 8e6, abrBandWidthFactor: 0.9, abrBandWidthUpFactor: 0.8, capLevelToPlayerSize: false,
+    }));
     let netFails = 0;
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { if (!this.userPaused) this.v.play().catch(() => {}); this.renderBadges(); });
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      // Se você fixou uma qualidade numa live, as próximas abrem nela (a mais próxima, sem passar).
+      const fixed = load('liveQuality', 0);
+      if (fixed) {
+        const i = hls.levels.reduce((best, l, n) => (l.height <= fixed && (best < 0 || l.height > hls.levels[best].height) ? n : best), -1);
+        if (i >= 0) hls.currentLevel = i;
+      }
+      if (!this.userPaused) this.v.play().catch(() => {});
+      this.renderBadges();
+    });
     hls.on(Hls.Events.LEVEL_SWITCHED, () => this.renderBadges());
     hls.on(Hls.Events.FRAG_LOADED, () => { netFails = 0; });
     hls.on(Hls.Events.ERROR, (e, d) => {
@@ -664,7 +679,11 @@ export class Player {
   }
 
   setQuality(h) {
-    if (this.hls) { this.hls.currentLevel = h === -1 ? -1 : this.hls.levels.findIndex((l) => l.height === h); return; }
+    if (this.hls) {
+      save('liveQuality', h === -1 ? 0 : h);
+      this.hls.currentLevel = h === -1 ? -1 : this.hls.levels.findIndex((l) => l.height === h);
+      return;
+    }
     const q = this.info.qualities.find((x) => x.height === h);
     if (!q || q === this.quality) return;
     save('quality2k', h);
