@@ -567,14 +567,30 @@ export class Player {
       }
       if (e.target.closest('.p-bar, .p-menu')) return;
       if (!this.menu.hidden) return this.toggleMenu(false);
-      // No toque, o primeiro toque só mostra os controles.
-      if (this.lastPointer === 'touch' && this.root.classList.contains('idle')) return this.wake();
+      // No toque (celular), tocar no vídeo só mostra ou esconde os controles, como no app do YouTube;
+      // pausar fica no botão. Com o mouse, clicar no vídeo pausa/toca.
+      if (this.lastPointer === 'touch') {
+        if (this.root.classList.contains('idle')) return this.wake();
+        clearTimeout(this.idleTimer);
+        if (this.playing) this.root.classList.add('idle');
+        return;
+      }
       this.toggle();
     });
-    on(this.root, 'dblclick', (e) => { if (!e.target.closest('.p-bar')) this.fullscreen(); });
+    // Duplo clique (mouse): tela cheia. Duplo toque (celular): volta ou avança 10 s nas laterais.
+    on(this.root, 'dblclick', (e) => {
+      if (e.target.closest('.p-bar, .p-menu')) return;
+      if (this.lastPointer !== 'touch') return this.fullscreen();
+      const r = this.root.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width;
+      if (x < 0.35) { this.seek(this.now - 10); this.bezel('back', '10 s'); }
+      else if (x > 0.65) { this.seek(this.now + 10); this.bezel('fwd', '10 s'); }
+    });
     on(this.root, 'pointerdown', (e) => { this.lastPointer = e.pointerType; });
-    on(this.root, 'pointermove', () => this.wake());
-    on(this.root, 'pointerleave', () => { if (this.playing) this.root.classList.add('idle'); });
+    on(this.root, 'pointermove', (e) => { if (e.pointerType === 'mouse') this.wake(); });
+    // Só o mouse saindo esconde os controles. No celular o Android avisa "saiu" ao fim de todo toque, antes de
+    // decidir onde o toque caiu: escondendo ali, o toque caía no vídeo e nenhum botão do player funcionava.
+    on(this.root, 'pointerleave', (e) => { if (e.pointerType === 'mouse' && this.playing) this.root.classList.add('idle'); });
     on(this.volInput, 'input', () => { this.out.volume = Number(this.volInput.value); this.out.muted = this.out.volume === 0; this.renderVolume(); });
 
     // Barra de progresso: arrastar, clicar e prévia do tempo (mostra o nome do trecho ou do seu momento).
@@ -740,7 +756,7 @@ export class Player {
     clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       if (this.playing && this.menu.hidden && !this.dragging) this.root.classList.add('idle');
-    }, 2600);
+    }, this.lastPointer === 'touch' ? 4000 : 2600); // no dedo, um pouco mais de tempo para achar o botão
   }
 
   paint(p) {
