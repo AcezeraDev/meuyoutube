@@ -1052,12 +1052,12 @@ async function watchView(id, t, listId) {
         <button class="rate-btn rpl" data-rate="DISLIKE" aria-pressed="false" title="Não gostei">${icon('dislike', 20)}<b id="w-dislikes"></b></button>
         <span class="v-bar" hidden><i></i></span>
       </span>
-      ${info.live ? '' : `<button class="pill rpl" data-bg aria-pressed="false">${icon('headphones', 20)}<span>Ouvir em segundo plano</span></button>`}
-      <button class="pill rpl" data-goto-comments>${icon('chat', 20)}Comentários</button>
-      <button class="pill rpl" data-save="${id}">${icon('listPlus', 20)}Salvar</button>
-      <button class="pill rpl" data-mark title="Guarda o momento atual do vídeo com uma nota">${icon('bookmark', 20)}Marcar momento</button>
-      <button class="pill rpl" data-share="${id}">${icon('share', 20)}Compartilhar</button>
-      ${info.live ? '' : downloadMenu(info)}
+      ${info.live ? '' : `<button class="pill rpl" data-bg aria-pressed="false">${icon('headphones', 20)}<span class="pl-long">Ouvir em segundo plano</span><span class="pl-short">Segundo plano</span></button>`}
+      <button class="pill rpl" data-goto-comments>${icon('chat', 20)}<span>Comentários</span></button>
+      <button class="pill rpl" data-save="${id}">${icon('listPlus', 20)}<span>Salvar</span></button>
+      <button class="pill rpl" data-mark title="Guarda o momento atual do vídeo com uma nota">${icon('bookmark', 20)}<span class="pl-long">Marcar momento</span><span class="pl-short">Marcar</span></button>
+      <button class="pill rpl" data-share="${id}">${icon('share', 20)}<span>Compartilhar</span></button>
+      ${info.live || IN_APP ? '' : downloadMenu(info)}
     </div>`;
   const watching = (n) => `<span id="w-watching">${n ? `${nf.format(n)} assistindo agora` : ''}</span>`;
   const liveSince = info.startedAt ? `ao vivo desde ${new Date(info.startedAt * 1000).toLocaleString('pt-BR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : 'ao vivo';
@@ -2335,7 +2335,9 @@ document.addEventListener('click', (e) => {
     const on = !player.audioOnly;
     player.setAudioOnly(on, false);
     el.setAttribute('aria-pressed', String(on));
-    el.querySelector('span').textContent = on ? 'Voltar para o vídeo' : 'Ouvir em segundo plano';
+    el.querySelector('.pl-long').textContent = on ? 'Voltar para o vídeo' : 'Ouvir em segundo plano';
+    el.querySelector('.pl-short').textContent = on ? 'Ver vídeo' : 'Segundo plano';
+    el.classList.toggle('on', on);
     toast(on ? (IN_APP ? 'Só o som: pode sair do app ou apagar a tela' : 'Só o som, economizando dados') : 'Vídeo de volta');
     return;
   }
@@ -2443,6 +2445,7 @@ document.addEventListener('keydown', (e) => {
 
 addEventListener('resize', () => { layout(); moveChipInd(); });
 addEventListener('popstate', () => { fromPop = true; route(); });
+addEventListener('meutube-toast', (e) => toast(e.detail)); // avisos vindos do app de celular
 $('[data-logo]').innerHTML = logo();
 document.fonts?.ready.then(moveChipInd);
 renderGuide();

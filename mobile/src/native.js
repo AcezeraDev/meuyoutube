@@ -4,6 +4,7 @@
 // - o pop-up (picture-in-picture) do Android é apresentado à tela como o pop-up de vídeo do navegador, que o
 //   player já sabe usar (requestPictureInPicture, eventos enter/leavepictureinpicture).
 import { registerPlugin } from '@capacitor/core';
+import { youtubeHash } from './links.js';
 
 const Media = registerPlugin('MeuTubeMedia');
 
@@ -12,6 +13,15 @@ let proxyP = null;
 export const mediaProxyBase = () => (proxyP ||= Media.mediaProxy().then((r) => r.base).catch(() => { proxyP = null; return ''; }));
 
 export function installNative() {
+  // Links do YouTube abertos no celular (ou compartilhados com o MeuTube) abrem o vídeo/canal aqui.
+  const openLink = ({ url }) => {
+    const hash = youtubeHash(url);
+    if (hash) location.hash = hash;
+    else if (url) window.dispatchEvent(new CustomEvent('meutube-toast', { detail: 'Esse link não é de um vídeo do YouTube.' }));
+  };
+  Media.addListener('link', openLink);
+  Media.takeLink().then(openLink).catch(() => {});
+
   // "Entrar com Google": a página de login abre no Android e volta com o texto do cookies.txt.
   window.meutubeNative = { googleLogin: () => Media.googleLogin().then((r) => r.cookies) };
 

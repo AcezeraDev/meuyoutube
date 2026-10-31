@@ -25,6 +25,32 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Links do YouTube (youtube.com, youtu.be, Shorts, canais) abrem no MeuTube. -->
+            <intent-filter android:label="Abrir no MeuTube">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="youtube.com" />
+                <data android:host="www.youtube.com" />
+                <data android:host="m.youtube.com" />
+                <data android:host="music.youtube.com" />
+                <data android:host="youtu.be" />
+            </intent-filter>
+            <intent-filter android:label="Abrir no MeuTube">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="vnd.youtube" />
+            </intent-filter>
+            <!-- "Compartilhar -> MeuTube" em qualquer app (WhatsApp, o app do YouTube...). -->
+            <intent-filter android:label="MeuTube">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
         </activity>
 
         <!-- Página de login do Google (para conectar a conta do YouTube no celular). -->

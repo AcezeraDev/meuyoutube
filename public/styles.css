@@ -1437,3 +1437,36 @@ body.docked .shorts { left: var(--guide-w); }
 html { scrollbar-width: thin; scrollbar-color: #2b3a4d transparent; }
 .rail, .ch-strip, .q-list, .pm-panel, .chat-list { scrollbar-width: thin; scrollbar-color: transparent transparent; transition: scrollbar-color 0.2s; }
 .rail:hover, .ch-strip:hover, .q-list:hover, .pm-panel:hover, .chat-list:hover { scrollbar-color: #2b3a4d transparent; }
+
+/* ---------- celular: página do vídeo e player fáceis de tocar ---------- */
+.pl-short { display: none; }
+@media (max-width: 791px) {
+  /* Botões do vídeo em grade (ícone com o nome embaixo), todos à vista, sem rolar para o lado. */
+  .w-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; width: 100%; overflow: visible; }
+  .w-actions > * { animation: none; }
+  .w-actions > .pill, .w-actions .dl-wrap > .pill {
+    width: 100%; height: auto; min-height: 60px; padding: 8px 4px; flex-direction: column; justify-content: center; gap: 4px;
+    border-radius: 14px; font-size: 11.5px; line-height: 14px; white-space: normal; text-align: center;
+  }
+  .w-actions > .pill > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .w-actions > .pill.on { background: var(--grad); color: #04121f; }
+  .w-actions .votes.rate { grid-column: span 2; flex-direction: row; justify-content: space-evenly; padding: 0 4px; }
+  .w-actions .votes .rate-btn { height: auto; flex-direction: column; gap: 3px; padding: 6px 10px; font-size: 12px; }
+  .w-actions .votes .v-sep { height: 30px; margin: 0; }
+  .w-actions .votes .v-bar { left: 20px; right: 20px; bottom: 5px; }
+  .w-actions .dl-wrap { display: flex; }
+  .w-actions > .pill > .pl-long { display: none; }
+  .w-actions > .pill > .pl-short { display: -webkit-box; }
+
+  /* Player: os botões cabem na tela (pop-up e tela cheia não ficam mais cortados) e são fáceis de acertar.
+     O volume fica nos botões do próprio celular. */
+  .p-bar { padding: 0 4px 2px; }
+  .p-row { height: 46px; }
+  .p-row button { width: 44px; height: 46px; flex: none; }
+  .p-vol, .p-badges { display: none; }
+  .p-time { font-size: 12px; margin-left: 4px; }
+  .p-progress { touch-action: none; }
+  /* Botões pequenos dos cards: área de toque maior para o dedo. */
+  .later, .compact .later { width: 36px; height: 36px; }
+  .more, .compact .more, .card .more { width: 40px; height: 40px; }
+}

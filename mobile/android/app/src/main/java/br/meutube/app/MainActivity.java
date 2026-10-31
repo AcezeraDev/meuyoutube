@@ -1,6 +1,7 @@
 package br.meutube.app;
 
 import android.app.PictureInPictureParams;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,6 +16,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(MeuTubeMediaPlugin.class);
+        // Abriu por um link do YouTube ou por "Compartilhar": a tela pega o link quando terminar de carregar.
+        MeuTubeMediaPlugin.pendingLink = linkFrom(getIntent());
         super.onCreate(savedInstanceState);
         // O Capacitor liga um gerenciador de cookies para os pedidos nativos, e o Android troca o cabeçalho Cookie que
         // o app manda pelos cookies guardados nele (só os de visitante): o YouTube recebia os pedidos como sem login.
@@ -23,6 +26,22 @@ public class MainActivity extends BridgeActivity {
         // Deixa o player começar a tocar sem esperar um toque (próximo vídeo da fila, retomar pela notificação).
         getBridge().getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
         getBridge().getWebView().getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
+    }
+
+    // ---------- links do YouTube ----------
+    static String linkFrom(Intent i) {
+        if (i == null) return null;
+        if (Intent.ACTION_VIEW.equals(i.getAction()) && i.getData() != null) return i.getData().toString();
+        if (Intent.ACTION_SEND.equals(i.getAction())) return i.getStringExtra(Intent.EXTRA_TEXT);
+        return null;
+    }
+
+    // Com o app já aberto, um link novo chega por aqui (a Activity é singleTask).
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        String link = linkFrom(intent);
+        if (link != null) MeuTubeMediaPlugin.sendLink(link);
     }
 
     // ---------- pop-up (picture-in-picture) ----------

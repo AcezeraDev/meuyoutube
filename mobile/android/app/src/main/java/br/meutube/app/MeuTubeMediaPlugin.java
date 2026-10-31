@@ -22,6 +22,7 @@ import androidx.activity.result.ActivityResult;
 @CapacitorPlugin(name = "MeuTubeMedia")
 public class MeuTubeMediaPlugin extends Plugin {
     static MeuTubeMediaPlugin instance;
+    static String pendingLink; // link do YouTube que abriu o app, esperando a tela pedir
     private boolean askedNotifications = false;
 
     @Override
@@ -34,6 +35,21 @@ public class MeuTubeMediaPlugin extends Plugin {
         JSObject data = new JSObject();
         data.put("action", action);
         instance.notifyListeners("action", data);
+    }
+
+    static void sendLink(String url) {
+        if (instance == null) { pendingLink = url; return; }
+        JSObject data = new JSObject();
+        data.put("url", url);
+        instance.notifyListeners("link", data);
+    }
+
+    @PluginMethod
+    public void takeLink(PluginCall call) {
+        JSObject r = new JSObject();
+        r.put("url", pendingLink == null ? "" : pendingLink);
+        pendingLink = null;
+        call.resolve(r);
     }
 
     static void sendPip(boolean active) {
