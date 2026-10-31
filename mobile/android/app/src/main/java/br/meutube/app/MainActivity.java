@@ -20,6 +20,8 @@ public class MainActivity extends BridgeActivity {
         // o app manda pelos cookies guardados nele (só os de visitante): o YouTube recebia os pedidos como sem login.
         // Sem ele, cada pedido leva exatamente o que o app manda (login só nos pedidos da conta).
         java.net.CookieHandler.setDefault(null);
+        // Entrega os vídeos do YouTube ao player em pedaços que o YouTube aceita (veja MediaWebViewClient).
+        getBridge().setWebViewClient(new MediaWebViewClient(getBridge()));
         // Deixa o player começar a tocar sem esperar um toque (próximo vídeo da fila, retomar pela notificação).
         getBridge().getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
         getBridge().getWebView().getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
