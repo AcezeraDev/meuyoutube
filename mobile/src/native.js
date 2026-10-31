@@ -8,6 +8,9 @@ import { registerPlugin } from '@capacitor/core';
 const Media = registerPlugin('MeuTubeMedia');
 
 export function installNative() {
+  // "Entrar com Google": a página de login abre no Android e volta com o texto do cookies.txt.
+  window.meutubeNative = { googleLogin: () => Media.googleLogin().then((r) => r.cookies) };
+
   const ms = navigator.mediaSession;
   const handlers = {};
   const media = new Set(); // <video> e <audio> que já tocaram (o <audio> do player não fica na página)

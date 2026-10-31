@@ -12,7 +12,10 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import androidx.activity.result.ActivityResult;
 
 // Recebe da tela o que está tocando (título, canal, capa, tocando ou não, se é vídeo) e devolve para ela os
 // botões apertados na notificação/tela de bloqueio/fone ("action") e a entrada e saída do pop-up ("pip").
@@ -95,5 +98,25 @@ public class MeuTubeMediaPlugin extends Plugin {
         Intent i = new Intent(getContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NEW_TASK);
         getContext().startActivity(i);
         call.resolve();
+    }
+
+    // "Entrar com Google": abre a página de login do Google e devolve os cookies do YouTube (texto do cookies.txt).
+    @PluginMethod
+    public void googleLogin(PluginCall call) {
+        startActivityForResult(call, new Intent(getContext(), GoogleLoginActivity.class), "googleLoginDone");
+    }
+
+    @ActivityCallback
+    private void googleLoginDone(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        Intent data = result.getData();
+        String cookies = data != null ? data.getStringExtra(GoogleLoginActivity.EXTRA_COOKIES) : null;
+        if (result.getResultCode() != android.app.Activity.RESULT_OK || cookies == null) {
+            call.reject("Login cancelado.");
+            return;
+        }
+        JSObject r = new JSObject();
+        r.put("cookies", cookies);
+        call.resolve(r);
     }
 }

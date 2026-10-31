@@ -1441,18 +1441,26 @@ function accountView() {
         </details>
         <button class="sub-btn connect rpl" data-connect>Conectar</button>
         <div id="acc-msg" aria-live="polite"></div>`}
-      <p class="acc-note">${icon('shield', 18)}<span>O site nunca pede nem guarda sua senha. Ele usa o login que já existe no seu navegador e guarda só os cookies do YouTube, neste computador (arquivo <code>cookies.txt</code> na pasta do site). Não compartilhe esse arquivo: ele dá acesso à sua conta. Para cortar o acesso a qualquer momento, clique em Desconectar ou saia da conta no YouTube.</span></p>
+      <p class="acc-note">${icon('shield', 18)}<span>${IN_APP
+        ? 'O app nunca pede nem guarda sua senha. Ele guarda só os cookies do YouTube, dentro do app, neste celular (nada vai para servidor nenhum). Não compartilhe o arquivo <code>cookies.txt</code>'
+        : 'O site nunca pede nem guarda sua senha. Ele usa o login que já existe no seu navegador e guarda só os cookies do YouTube, neste computador (arquivo <code>cookies.txt</code> na pasta do site). Não compartilhe esse arquivo'}: ele dá acesso à sua conta. Para cortar o acesso a qualquer momento, clique em Desconectar ou saia da conta no YouTube.</span></p>
     </div>
   </section>`;
   // Se um login com Google já estava em andamento (ex.: a página recarregou), retoma o acompanhamento.
-  if (!c && accMethod() === 'google') pollGoogle();
+  if (!c && accMethod() === 'google' && !IN_APP) pollGoogle();
 }
 
 // Três jeitos de conectar: entrar com Google numa janela isolada (principal), arquivo de login ou direto do Firefox.
-const accMethod = () => store.get('accMethod2', 'google');
+// No app de celular: entrar com Google (página do Google dentro do app) ou arquivo de login; o Firefox só no PC.
+const IN_APP = Boolean(window.meutubeApp);
+const accMethod = () => {
+  const m = store.get('accMethod2', 'google');
+  return IN_APP && m === 'browser' ? 'google' : m;
+};
 const methodSwitch = () => {
   const cur = accMethod();
-  return `<div class="seg acc-methods" role="tablist">${[['google', 'Entrar com Google'], ['file', 'Arquivo de login'], ['browser', 'Firefox']].map(([v, l]) => `<button class="seg-btn rpl ${cur === v ? 'on' : ''}" role="tab" aria-selected="${cur === v}" data-method="${v}">${l}</button>`).join('')}</div>`;
+  const list = [['google', 'Entrar com Google'], ['file', 'Arquivo de login'], ...(IN_APP ? [] : [['browser', 'Firefox']])];
+  return `<div class="seg acc-methods" role="tablist">${list.map(([v, l]) => `<button class="seg-btn rpl ${cur === v ? 'on' : ''}" role="tab" aria-selected="${cur === v}" data-method="${v}">${l}</button>`).join('')}</div>`;
 };
 // ---------- "Entrar com Google" ----------
 const GOOGLE_G = `<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>`;
@@ -1476,6 +1484,10 @@ function googleMethod() {
           <button class="pill rpl" data-google-cancel>Cancelar</button>
         </div>
       </div>`;
+  } else if (IN_APP && s.status !== 'saving') {
+    body = `<button class="google-btn rpl" data-google-start>${GOOGLE_G}<span>Entrar com Google</span></button>
+      <p class="acc-hint">Abre a <strong>página oficial do Google</strong> aqui no app. Você entra na sua conta como sempre; o app nunca vê sua senha e guarda só o login do YouTube, neste celular.</p>
+      ${s.status === 'error' ? failure(new Error(s.error || 'Não deu certo.')) : ''}`;
   } else if (s.status === 'saving') {
     body = `<div class="g-live"><span class="g-saving"><span class="btn-spin"></span></span><b>Salvando seu login…</b><span class="meta sm">Isso leva só alguns segundos.</span></div>`;
   } else {
@@ -1503,7 +1515,19 @@ async function pollGoogle() {
   if (['waiting', 'saving'].includes(googleState.status)) googlePoll = setTimeout(pollGoogle, 1000);
 }
 
-const fileMethod = () => `${methodSwitch()}
+const fileMethod = () => (IN_APP ? `
+  <ol class="acc-steps">
+    <li><span>1</span><div>No PC, pegue o arquivo <strong>cookies.txt</strong> que fica na pasta do MeuTube (ou exporte um novo com a extensão <strong>Get cookies.txt LOCALLY</strong>, com o youtube.com aberto e a conta entrada).</div></li>
+    <li><span>2</span><div>Mande o arquivo para o celular <strong>só para você mesma</strong>: Google Drive, cabo USB ou “mensagem para mim”.</div></li>
+    <li><span>3</span><div>Toque abaixo e escolha o arquivo.</div></li>
+  </ol>
+  <label class="drop" id="drop" tabindex="0">
+    <input type="file" id="cookie-file" accept=".txt,text/plain" hidden>
+    <span class="drop-ic">${icon('download', 26)}</span>
+    <strong>Escolher o arquivo de login</strong>
+    <span class="meta sm">o cookies.txt</span>
+  </label>
+  <div id="acc-msg" aria-live="polite"></div>` : `${methodSwitch()}
   <p class="acc-hint">Para <strong>Brave, Chrome, Edge</strong> e outros. Funciona com o navegador aberto.</p>
   <ol class="acc-steps">
     <li><span>1</span><div>Instale a extensão <a href="https://chromewebstore.google.com/search/Get%20cookies.txt%20LOCALLY" target="_blank" rel="noopener noreferrer"><strong>Get cookies.txt LOCALLY</strong></a> (gratuita e de código aberto; no Brave ela vem da mesma loja do Chrome).</div></li>
@@ -1516,7 +1540,7 @@ const fileMethod = () => `${methodSwitch()}
     <strong>Arraste o arquivo aqui</strong>
     <span class="meta sm">ou clique para escolher o arquivo .txt</span>
   </label>
-  <div id="acc-msg" aria-live="polite"></div>`;
+  <div id="acc-msg" aria-live="polite"></div>`);
 
 async function connected(msg) {
   await loadAccount();
@@ -1540,7 +1564,7 @@ async function uploadCookies(file) {
     await connected('Conta do YouTube conectada');
   } catch (e) {
     drop.classList.remove('busy');
-    drop.querySelector('strong').textContent = 'Arraste o arquivo aqui';
+    drop.querySelector('strong').textContent = IN_APP ? 'Escolher o arquivo de login' : 'Arraste o arquivo aqui';
     msg.innerHTML = failure(e);
   }
 }
@@ -1853,6 +1877,22 @@ document.addEventListener('click', (e) => {
     return route();
   }
   if (el.hasAttribute('data-retry-now')) return route();
+  if (el.hasAttribute('data-google-start') && IN_APP) {
+    // Celular: a janela de login é do próprio app; ela devolve o cookies.txt, que entra como o arquivo de login.
+    window.meutubeNative.googleLogin()
+      .then(async (text) => {
+        googleState = { status: 'saving' };
+        renderGoogle();
+        await send('/api/account/cookies', { text });
+        googleState = { status: 'idle' };
+        await connected('Conta Google conectada');
+      })
+      .catch((err) => {
+        googleState = /cancel/i.test(err.message) ? { status: 'idle' } : { status: 'error', error: err.message };
+        renderGoogle();
+      });
+    return;
+  }
   if (el.hasAttribute('data-google-start')) {
     googleState = { status: 'waiting', browser: account.loginBrowser };
     renderGoogle();

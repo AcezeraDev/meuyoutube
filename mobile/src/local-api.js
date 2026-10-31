@@ -37,9 +37,6 @@ const storage = {
   del: (k) => { try { localStorage.removeItem(k); } catch {} },
 };
 
-// No celular a conta entra pelo arquivo cookies.txt (a janela "Entrar com Google" só existe no PC).
-if (storage.get('accMethod2') == null) storage.set('accMethod2', JSON.stringify('file'));
-
 const api = createApi({ fetch: nativeFetch, sha1, storage });
 window.meutubeApi = api;
 window.meutubeApp = true;

@@ -26,6 +26,13 @@
 
         </activity>
 
+        <!-- Página de login do Google (para conectar a conta do YouTube no celular). -->
+        <activity
+            android:name=".GoogleLoginActivity"
+            android:label="Entrar com Google"
+            android:theme="@style/AppTheme.NoActionBar"
+            android:exported="false" />
+
         <!-- Mantém o som tocando com o app fechado ou a tela apagada (notificação com os controles). -->
         <service
             android:name=".MediaService"
