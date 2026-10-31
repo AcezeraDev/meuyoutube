@@ -117,15 +117,11 @@ export function installNative() {
   Media.addListener('action', ({ action }) => { if (action === 'exit-fullscreen') document.exitFullscreen(); });
 
   // ---------- pop-up ----------
+  // O aviso "entrou/saiu do pop-up" vem do Android, mas nem sempre chega à página. Por isso o pop-up também é
+  // percebido pelo tamanho da janela: a janelinha do pop-up é pequena (menos de 320 px de altura); voltou ao
+  // tamanho normal, saiu. Sem isso a janelinha mostrava a página inteira miniaturizada e o botão parava de abrir.
   let pipEl = null;
-  Object.defineProperty(Document.prototype, 'pictureInPictureEnabled', { configurable: true, get: () => true });
-  Object.defineProperty(Document.prototype, 'pictureInPictureElement', { configurable: true, get: () => pipEl });
-  Document.prototype.exitPictureInPicture = () => Media.exitPip().catch(() => {});
-  HTMLVideoElement.prototype.requestPictureInPicture = function () {
-    media.add(this);
-    return Media.enterPip({ width: this.videoWidth || 16, height: this.videoHeight || 9 }).then(() => ({ width: innerWidth, height: innerHeight }));
-  };
-  Media.addListener('pip', ({ active }) => {
+  const setPip = (active) => {
     document.body.classList.toggle('native-pip', active);
     if (active && !pipEl) {
       pipEl = activeVideo() || document.querySelector('.player video');
@@ -135,5 +131,21 @@ export function installNative() {
       pipEl = null;
       el.dispatchEvent(new Event('leavepictureinpicture'));
     }
-  });
+  };
+  Object.defineProperty(Document.prototype, 'pictureInPictureEnabled', { configurable: true, get: () => true });
+  Object.defineProperty(Document.prototype, 'pictureInPictureElement', { configurable: true, get: () => pipEl });
+  Document.prototype.exitPictureInPicture = () => Media.exitPip().catch(() => {});
+  HTMLVideoElement.prototype.requestPictureInPicture = function () {
+    media.add(this);
+    setPip(false); // se ficou algum estado velho de um pop-up anterior, começa do zero
+    return Media.enterPip({ width: this.videoWidth || 16, height: this.videoHeight || 9 }).then(() => ({ width: innerWidth, height: innerHeight }));
+  };
+  Media.addListener('pip', ({ active }) => setPip(active));
+  const bySize = () => {
+    const tiny = innerHeight > 0 && innerHeight < 320 && innerWidth < 600;
+    if (tiny && !pipEl) setPip(true);
+    else if (!tiny && pipEl) setPip(false);
+  };
+  addEventListener('resize', bySize);
+  document.addEventListener('visibilitychange', () => setTimeout(bySize, 300));
 }

@@ -169,7 +169,8 @@ export class Player {
   // ---------- miniplayer (pop-up) ----------
   get inPip() { return Boolean(this.pipWin) || document.pictureInPictureElement === this.v; }
   async togglePip() {
-    if (this.inPip) {
+    // No app de celular, se dá para tocar no botão é porque o pop-up está fechado: sempre abre.
+    if (this.inPip && !window.meutubeApp) {
       // Dentro do pop-up, o botão traz o vídeo de volta para a página dele.
       if (this.pipWin && this.opts.onPipBack) return this.opts.onPipBack();
       return this.exitPip();
