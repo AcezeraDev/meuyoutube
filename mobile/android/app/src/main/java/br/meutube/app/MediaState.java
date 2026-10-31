@@ -15,6 +15,10 @@ final class MediaState {
     boolean video = false;
     boolean canNext = false;
     boolean active = false;
+    long duration = 0; // ms (0 = sem duração, ex.: live)
+    long position = 0; // ms, no momento em que chegou (positionAt)
+    long positionAt = 0; // SystemClock.elapsedRealtime() da última posição
+    float speed = 1f;
     int width = 16;
     int height = 9;
 }

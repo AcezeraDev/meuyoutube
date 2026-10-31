@@ -509,6 +509,7 @@ export class Player {
     };
     on(v, 'ended', ended);
     on(v, 'seeking', () => { this.endedFired = false; });
+    for (const el of [v, a].filter(Boolean)) for (const ev of ['loadedmetadata', 'playing', 'pause', 'seeked', 'ratechange']) on(el, ev, () => this.positionState());
     on(v, 'error', () => { if (!this.audioOnly) this.recover(); });
     on(v, 'enterpictureinpicture', () => this.root.classList.add('in-pip'));
     on(v, 'leavepictureinpicture', () => this.root.classList.remove('in-pip'));
@@ -887,8 +888,21 @@ export class Player {
     ms.setActionHandler('seekbackward', () => this.seek(this.now - 10));
     ms.setActionHandler('seekforward', () => this.seek(this.now + 10));
     ms.setActionHandler('nexttrack', this.opts.onNext ? () => this.opts.onNext() : null);
+    // Barra de tempo do painel de mídia (celular, Windows): arrastar pula; "anterior" volta ao começo.
+    try { ms.setActionHandler('seekto', (d) => { if (d.seekTime != null) this.seek(d.seekTime); }); } catch {}
+    try { ms.setActionHandler('previoustrack', () => this.seek(0)); } catch {}
     // Chrome pode abrir o miniplayer sozinho quando você troca de aba com o vídeo tocando.
     try { if (PIP_OK) ms.setActionHandler('enterpictureinpicture', () => { if (!this.inPip) this.togglePip(); }); } catch {}
+  }
+
+  // Posição e duração para o painel de mídia do sistema (a barra de tempo anda sozinha a partir daqui).
+  positionState() {
+    if (!('mediaSession' in navigator) || this.live || !navigator.mediaSession.setPositionState) return;
+    const duration = this.duration;
+    if (!(duration > 0)) return;
+    try {
+      navigator.mediaSession.setPositionState({ duration, position: Math.min(duration, Math.max(0, this.now)), playbackRate: this.out.playbackRate || 1 });
+    } catch {}
   }
 
   destroy() {

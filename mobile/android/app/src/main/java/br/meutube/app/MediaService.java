@@ -62,6 +62,8 @@ public class MediaService extends Service {
             @Override public void onPlay() { MeuTubeMediaPlugin.sendAction("play"); }
             @Override public void onPause() { MeuTubeMediaPlugin.sendAction("pause"); }
             @Override public void onSkipToNext() { MeuTubeMediaPlugin.sendAction("next"); }
+            @Override public void onSkipToPrevious() { MeuTubeMediaPlugin.sendAction("previous"); }
+            @Override public void onSeekTo(long pos) { MeuTubeMediaPlugin.sendSeek(pos); }
             @Override public void onFastForward() { MeuTubeMediaPlugin.sendAction("forward"); }
             @Override public void onRewind() { MeuTubeMediaPlugin.sendAction("back"); }
             @Override public void onStop() { MeuTubeMediaPlugin.sendAction("pause"); }
@@ -104,15 +106,19 @@ public class MediaService extends Service {
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, s.title)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, s.artist);
         if (art != null) md.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art);
+        if (s.duration > 0) md.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, s.duration);
         session.setMetadata(md.build());
 
         long actions = PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE | PlaybackStateCompat.ACTION_PLAY_PAUSE
                 | PlaybackStateCompat.ACTION_FAST_FORWARD | PlaybackStateCompat.ACTION_REWIND | PlaybackStateCompat.ACTION_STOP
-                | (s.canNext ? PlaybackStateCompat.ACTION_SKIP_TO_NEXT : 0);
+                | (s.canNext ? PlaybackStateCompat.ACTION_SKIP_TO_NEXT : 0)
+                | (s.duration > 0 ? PlaybackStateCompat.ACTION_SEEK_TO | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS : 0);
+        // Com posição, velocidade e o momento em que ela foi medida, o Android anda com a barra de tempo sozinho.
         session.setPlaybackState(new PlaybackStateCompat.Builder()
                 .setActions(actions)
                 .setState(s.playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
-                        PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1f)
+                        s.duration > 0 ? s.position : PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
+                        s.playing ? s.speed : 0f, s.positionAt > 0 ? s.positionAt : android.os.SystemClock.elapsedRealtime())
                 .build());
 
         NotificationCompat.Builder n = new NotificationCompat.Builder(this, CHANNEL)

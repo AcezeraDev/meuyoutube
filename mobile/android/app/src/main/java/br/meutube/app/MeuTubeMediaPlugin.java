@@ -62,6 +62,15 @@ public class MeuTubeMediaPlugin extends Plugin {
         call.resolve(r);
     }
 
+    // Arrastou a barra de tempo do painel de mídia: pula para esse ponto (em segundos).
+    static void sendSeek(long ms) {
+        if (instance == null) return;
+        JSObject data = new JSObject();
+        data.put("action", "seekto");
+        data.put("time", ms / 1000.0);
+        instance.notifyListeners("action", data);
+    }
+
     static void sendPip(boolean active) {
         if (instance == null) return;
         JSObject data = new JSObject();
@@ -80,6 +89,10 @@ public class MeuTubeMediaPlugin extends Plugin {
         s.width = call.getInt("width", 16);
         s.height = call.getInt("height", 9);
         s.canNext = Boolean.TRUE.equals(call.getBoolean("canNext", false));
+        s.duration = Math.max(0, call.getDouble("duration", 0.0).longValue());
+        s.position = Math.max(0, call.getDouble("position", 0.0).longValue());
+        s.speed = call.getDouble("speed", 1.0).floatValue();
+        s.positionAt = android.os.SystemClock.elapsedRealtime();
         s.active = true;
 
         // Android 13+: a notificação com os controles precisa de permissão (pede uma vez, quando começa a tocar).

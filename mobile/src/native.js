@@ -30,6 +30,7 @@ export function installNative() {
   const media = new Set(); // <video> e <audio> que já tocaram (o <audio> do player não fica na página)
   let meta = null;
   let state = 'none';
+  let pos = null; // { duration, position, rate, at } da última setPositionState
 
   // O vídeo que está na tela tocando (para o pop-up). No modo só áudio não há vídeo.
   const activeVideo = () => [...media].find((m) => m instanceof HTMLVideoElement && m.isConnected && m.src && !m.paused && m.videoWidth)
@@ -51,6 +52,10 @@ export function installNative() {
         width: v?.videoWidth || 16,
         height: v?.videoHeight || 9,
         canNext: Boolean(handlers.nexttrack),
+        // Barra de tempo do painel: posição de agora (o Android anda com ela sozinho a partir daqui).
+        duration: pos ? Math.round(pos.duration * 1000) : 0,
+        position: pos ? Math.round((pos.position + (state === 'playing' ? ((Date.now() - pos.at) / 1000) * pos.rate : 0)) * 1000) : 0,
+        speed: pos ? pos.rate : 1,
       }).catch(() => {});
     }, 150);
   };
@@ -61,12 +66,18 @@ export function installNative() {
     const metaDesc = desc('metadata'), stateDesc = desc('playbackState');
     Object.defineProperty(ms, 'metadata', {
       get: () => metaDesc?.get?.call(ms) ?? meta,
-      set: (m) => { meta = m; try { metaDesc?.set?.call(ms, m); } catch {} push(); },
+      set: (m) => { meta = m; pos = null; try { metaDesc?.set?.call(ms, m); } catch {} push(); },
     });
     Object.defineProperty(ms, 'playbackState', {
       get: () => state,
       set: (s) => { state = s; try { stateDesc?.set?.call(ms, s); } catch {} push(); },
     });
+    const setPosition = ms.setPositionState?.bind(ms);
+    ms.setPositionState = (p) => {
+      pos = p && p.duration ? { duration: p.duration, position: p.position || 0, rate: p.playbackRate || 1, at: Date.now() } : null;
+      try { setPosition?.(p); } catch {}
+      push();
+    };
     const setHandler = ms.setActionHandler.bind(ms);
     ms.setActionHandler = (action, fn) => {
       handlers[action] = fn || null;
@@ -82,9 +93,10 @@ export function installNative() {
   addEventListener('pagehide', () => Media.stop().catch(() => {}));
 
   // Botões da notificação, da tela de bloqueio e do fone de ouvido.
-  Media.addListener('action', ({ action }) => {
-    const h = handlers[action === 'next' ? 'nexttrack' : action === 'back' ? 'seekbackward' : action === 'forward' ? 'seekforward' : action];
-    if (h) h({ action });
+  Media.addListener('action', ({ action, time }) => {
+    const name = { next: 'nexttrack', previous: 'previoustrack', back: 'seekbackward', forward: 'seekforward' }[action] || action;
+    const h = handlers[name];
+    if (h) h({ action: name, seekTime: time });
     else if (action === 'pause') [...media].forEach((m) => m.pause());
   });
 
