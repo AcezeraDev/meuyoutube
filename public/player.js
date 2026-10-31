@@ -30,7 +30,8 @@ export class Player {
     const probe = document.createElement('video');
     const playable = info.qualities.filter((q) => !q.type || probe.canPlayType(q.type));
     if (playable.length) info.qualities = playable;
-    const pref = load('quality2k', 1440);
+    // Padrão: a maior até 2K no PC; no app de celular, 1080p (abre mais rápido; dá para mudar na engrenagem).
+    const pref = load('quality2k', window.meutubeApp ? 1080 : 1440);
     this.quality = info.qualities.find((q) => q.height <= pref) || info.qualities[info.qualities.length - 1];
     this.lastSave = 0;
     this.retried = false;

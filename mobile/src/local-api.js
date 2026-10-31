@@ -38,6 +38,7 @@ const storage = {
 };
 
 const api = createApi({ fetch: nativeFetch, sha1, storage });
+setTimeout(() => api.warm(), 300);
 window.meutubeApi = api;
 window.meutubeApp = true;
 document.documentElement.classList.add('app'); // estilos mais leves para o celular (veja o fim do styles.css)

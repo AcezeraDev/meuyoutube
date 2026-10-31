@@ -17,166 +17,10 @@ const YT_LINE = /^(#HttpOnly_)?\.?([\w-]+\.)*youtube\.com\t/i;
 const https = (u) => (u && u.startsWith('//') ? 'https:' + u : u || '');
 const norm = (s) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// ---------- leitura de números e datas em português ----------
-// "4,03 mi de inscritos" -> 4030000; "1.234 visualizações" -> 1234; "12 mil" -> 12000.
-export function ptNum(s) {
-  const m = /(\d[\d.,]*)\s*(mil|mi|bi|k|m|b)?\b/i.exec(String(s || '').replace(/ /g, ' '));
-  if (!m) return 0;
-  const mult = { mil: 1e3, k: 1e3, mi: 1e6, m: 1e6, bi: 1e9, b: 1e9 }[(m[2] || '').toLowerCase()] || 1;
-  const n = mult > 1 ? parseFloat(m[1].replace(/\./g, '').replace(',', '.')) : Number(m[1].replace(/[.,]/g, ''));
-  return Math.round(n * mult) || 0;
-}
-// "1:02:03" -> 3723
-const clock = (s) => (/^\d+(:\d{2}){1,2}$/.test(String(s || '').trim()) ? String(s).trim().split(':').reduce((a, b) => a * 60 + Number(b), 0) : 0);
-const ymd = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-const MONTHS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
-// "há 3 dias" / "31 de out. de 2026" / "Estreou em 2 de jan. de 2020" -> "AAAAMMDD" (o formato que a tela usa).
-export function ptDate(s) {
-  s = String(s || '').toLowerCase();
-  const abs = /(\d{1,2}) de ([a-zç]{3})[a-zç]*\.? de (\d{4})/.exec(s);
-  if (abs && MONTHS.includes(abs[2])) return ymd(new Date(+abs[3], MONTHS.indexOf(abs[2]), +abs[1]));
-  const rel = /há (\d+) (segundo|minuto|hora|dia|semana|m[eê]s|meses|ano)/.exec(s);
-  if (!rel) return '';
-  const days = { segundo: 0, minuto: 0, hora: 0, dia: 1, semana: 7, mes: 30, mês: 30, meses: 30, ano: 365 }[rel[2]] * Number(rel[1]);
-  return ymd(new Date(Date.now() - days * 864e5));
-}
-
-// ---------- leitura genérica das listas do YouTube ----------
-// As respostas mudam de formato com frequência (videoRenderer, lockupViewModel...). Em vez de seguir um caminho fixo,
-// procura em qualquer profundidade tudo que tenha cara de vídeo ou de canal.
-const VIDEO_KEYS = ['videoRenderer', 'compactVideoRenderer', 'gridVideoRenderer', 'playlistVideoRenderer', 'videoWithContextRenderer', 'playlistPanelVideoRenderer'];
-const CHANNEL_KEYS = ['channelRenderer', 'gridChannelRenderer'];
-function walk(o, visit, seen = new Set()) {
-  if (!o || typeof o !== 'object' || seen.has(o)) return;
-  seen.add(o);
-  if (visit(o)) return;
-  for (const v of Object.values(o)) walk(v, visit, seen);
-}
-const allText = (o) => {
-  const out = [];
-  walk(o, (x) => {
-    if (typeof x.content === 'string') out.push(x.content);
-    if (typeof x.simpleText === 'string') out.push(x.simpleText);
-    if (Array.isArray(x.runs)) out.push(x.runs.map((r) => r.text || '').join(''));
-    if (typeof x.text === 'string') out.push(x.text);
-  });
-  return out.filter(Boolean);
-};
-const bestThumb = (list) => https(((list || []).filter((t) => t.url && (t.width || 0) >= 320).sort((a, b) => a.width - b.width)[0] || (list || []).slice(-1)[0])?.url);
-const lastUrl = (list) => https((list || []).slice(-1)[0]?.url);
-const isVerified = (o) => /VERIFIED|CHECK_CIRCLE/.test(JSON.stringify(o || ''));
-const channelOf = (o) => {
-  const ids = dig(o, 'browseEndpoint').filter((b) => CHANNEL_ID.test(b?.browseId || ''));
-  return ids[0] || {};
-};
-const LIVE_RE = /^(ao vivo|live|aovivo)$/i;
-
-function fromRenderer(r) {
-  const owner = r.ownerText || r.longBylineText || r.shortBylineText;
-  const ch = channelOf(owner || r);
-  const overlays = JSON.stringify(r.thumbnailOverlays || '');
-  const badgeTexts = allText(r.badges || []);
-  const live = /"style":"LIVE"|LIVE_NOW/.test(overlays + JSON.stringify(r.badges || '')) || badgeTexts.some((t) => LIVE_RE.test(t.trim()));
-  const timeTxt = txt(r.lengthText) || txt(dig1(r.thumbnailOverlays, 'thumbnailOverlayTimeStatusRenderer')?.text);
-  const viewsTxt = txt(r.viewCountText) || txt(r.shortViewCountText);
-  return {
-    id: r.videoId,
-    title: txt(r.title) || txt(r.headline),
-    channel: txt(owner).split(' e ')[0] || '',
-    channelId: ch.browseId || r.channelId || '',
-    verified: isVerified(r.ownerBadges),
-    avatar: lastUrl(dig1(r.channelThumbnailSupportedRenderers || r.channelThumbnail || {}, 'thumbnails')),
-    duration: live ? 0 : clock(timeTxt) || Number(r.lengthSeconds) || 0,
-    views: ptNum(viewsTxt),
-    live,
-    date: ptDate(txt(r.publishedTimeText)),
-    description: (txt(r.descriptionSnippet) || txt(dig1(r.detailedMetadataSnippets, 'snippetText'))).slice(0, 200),
-    thumb: bestThumb(r.thumbnail?.thumbnails),
-  };
-}
-
-function fromLockup(l) {
-  if (!VIDEO_ID.test(l.contentId || '') || (l.contentType && !/VIDEO/.test(l.contentType))) return null;
-  const md = l.metadata?.lockupMetadataViewModel || {};
-  const parts = dig(md.metadata, 'metadataParts').flat().map((p) => p?.text?.content || '').filter(Boolean);
-  const overlayText = allText(l.contentImage).map((t) => t.trim());
-  const live = overlayText.some((t) => LIVE_RE.test(t)) || /LIVE/.test(JSON.stringify(dig(l.contentImage, 'badgeStyle')));
-  const ch = channelOf(md);
-  return {
-    id: l.contentId,
-    title: md.title?.content || '',
-    channel: parts.find((p) => !/visualiza|assistindo|há \d|inscrit/i.test(p)) || '',
-    channelId: ch.browseId || '',
-    verified: isVerified(md.metadata),
-    avatar: lastUrl(dig1(md.image, 'sources')),
-    duration: live ? 0 : clock(overlayText.find((t) => clock(t))),
-    views: ptNum(parts.find((p) => /visualiza|assistindo/i.test(p))),
-    live,
-    date: ptDate(parts.find((p) => /há \d/i.test(p))),
-    description: '',
-    thumb: bestThumb(dig1(l.contentImage, 'sources')),
-  };
-}
-
-export function videosFrom(json, channel = {}) {
-  const out = [];
-  const seen = new Set();
-  walk(json, (o) => {
-    let v = null;
-    const key = VIDEO_KEYS.find((k) => o[k]);
-    if (key) v = o[key].videoId ? fromRenderer(o[key]) : null;
-    else if (o.lockupViewModel) v = fromLockup(o.lockupViewModel);
-    else return CHANNEL_KEYS.some((k) => o[k]); // canais e anúncios: não entra
-    if (v && VIDEO_ID.test(v.id) && v.title && !seen.has(v.id)) {
-      seen.add(v.id);
-      out.push({
-        ...v,
-        channel: v.channel || channel.name || '',
-        channelId: v.channelId || channel.id || '',
-        avatar: v.avatar || channel.avatar || '',
-        verified: v.verified || Boolean(channel.verified),
-      });
-    }
-    return true;
-  });
-  return out;
-}
-
-export function channelsFrom(json) {
-  const out = [];
-  walk(json, (o) => {
-    const key = CHANNEL_KEYS.find((k) => o[k]);
-    if (!key) return false;
-    const c = o[key];
-    if (!CHANNEL_ID.test(c.channelId || '')) return true;
-    // Na busca o YouTube trocou os campos: "subscriberCountText" traz o @ e "videoCountText" os inscritos.
-    const texts = [txt(c.subscriberCountText), txt(c.videoCountText)];
-    out.push({
-      id: c.channelId,
-      name: txt(c.title),
-      handle: texts.find((t) => t.startsWith('@')) || (c.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl || '').replace(/^\//, '').replace(/^(?!@).*/, ''),
-      followers: ptNum(texts.find((t) => /inscrit/i.test(t))),
-      description: txt(c.descriptionSnippet).slice(0, 220),
-      verified: isVerified(c.ownerBadges),
-      avatar: lastUrl(c.thumbnail?.thumbnails),
-    });
-    return true;
-  });
-  return out;
-}
-
-// Ficha de continuação (próxima página): o último item da maior lista da resposta. (Há outras fichas soltas,
-// como as do filtro "Mais recentes/Populares" do canal, que não são a página seguinte.)
-export function nextToken(json) {
-  let best = { n: 0, token: '' };
-  walk(json, (o) => {
-    if (!Array.isArray(o) || o.length < 2) return false;
-    const token = dig1(o[o.length - 1]?.continuationItemRenderer, 'continuationCommand')?.token;
-    if (token && o.length > best.n) best = { n: o.length, token };
-    return false;
-  });
-  return best.token;
-}
+// Leitura das respostas do YouTube (números e datas em português, listas de vídeos e canais): fica no
+// lib/yt-web.js, junto com o servidor do PC.
+const { ptNum, ptDate, ptAgo, clock, walk, allText, bestThumb, lastUrl, isVerified, videosFrom, channelsFrom, nextToken } = ytw;
+export { ptNum, ptDate, videosFrom, channelsFrom, nextToken };
 
 // ---------- a "API" ----------
 // fetch(url, init): fetch que pode mandar Cookie/User-Agent (no celular, o nativo). sha1(texto) -> hex.
@@ -378,6 +222,7 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
     return {
       title: txt(primary.title),
       date: ptDate(txt(primary.dateText)),
+      published: ptAgo(txt(primary.dateText)),
       likes,
       viewers: Number(dig1(n, 'videoViewCountRenderer')?.originalViewCount) || ptNum(txt(dig1(n, 'videoViewCountRenderer')?.viewCount)),
       channel: txt(owner.title),
@@ -418,6 +263,7 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
         views: Number(bi.view_count) || 0,
         likes: m.likes || 0,
         date: m.date || '',
+        published: m.published || 0,
         avatar: m.avatar || '',
         followers: m.followers || 0,
       };
@@ -515,7 +361,11 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
     }
     if (p === '/api/live-now') return ok(await liveNow(ids(u, CHANNEL_ID, 12)));
     if (p === '/api/avatars') return ok({});
-    if (p === '/api/prefetch') return { status: 204, body: null };
+    // Pré-carga: começa a buscar o vídeo quando você toca no card (quando o vídeo abre, ele já está pronto).
+    if (p === '/api/prefetch') {
+      if (VIDEO_ID.test(q('id'))) video(q('id')).catch(() => {});
+      return { status: 204, body: null };
+    }
     if (p === '/api/segments') { try { return ok(await segments(q('id'))); } catch { return ok([]); } }
     if (p === '/api/votes') { try { return ok(await votes(q('id'))); } catch { return ok(null); } }
 
@@ -581,5 +431,7 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
       return fail(e.code === 'bot' ? 429 : 500, e.message || 'Algo deu errado.', e.code || '');
     }
   }
-  return { handle, video, search, channelPage, feed, loggedIn };
+  // Aquece a conexão com o YouTube (o primeiro vídeo abre mais rápido).
+  const warm = () => yt().catch(() => {});
+  return { handle, video, search, channelPage, feed, loggedIn, warm };
 }

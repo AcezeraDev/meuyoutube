@@ -1430,3 +1430,10 @@ body.docked .shorts { left: var(--guide-w); }
   .short { padding: 0; }
   .sh-stage { width: 100%; height: 100%; aspect-ratio: auto; border-radius: 0; }
 }
+
+/* ---------- barras de rolagem ----------
+   Finas e escuras (sem a cor definida, o Chrome do Windows desenhava a barra cinza com setinhas).
+   Nas fileiras de vídeos e listas a barra só aparece com o mouse em cima. */
+html { scrollbar-width: thin; scrollbar-color: #2b3a4d transparent; }
+.rail, .ch-strip, .q-list, .pm-panel, .chat-list { scrollbar-width: thin; scrollbar-color: transparent transparent; transition: scrollbar-color 0.2s; }
+.rail:hover, .ch-strip:hover, .q-list:hover, .pm-panel:hover, .chat-list:hover { scrollbar-color: #2b3a4d transparent; }

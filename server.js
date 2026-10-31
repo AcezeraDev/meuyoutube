@@ -261,7 +261,7 @@ function channelEntry(e) {
 const PAGE = 24;
 const items = (page) => ['-I', `${page * PAGE + 1}:${(page + 1) * PAGE}`];
 
-function search(q, withChannels = true, page = 0, live = false) {
+function searchYtdlp(q, withChannels = true, page = 0, live = false) {
   return cached(`s:${withChannels ? 1 : 0}:${live ? 1 : 0}:${page}:${q.toLowerCase()}`, TTL.search, async () => {
     // Canais e vídeos em paralelo (a busca de canais é pulada nas sugestões, nos temas e nas páginas seguintes).
     const chanReq = !withChannels || page > 0 ? Promise.resolve([]) : ytdlp(['--flat-playlist', '-J', '--playlist-end', '8', `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&sp=EgIQAg%3D%3D`], { pt: false })
@@ -317,7 +317,7 @@ const FEEDS = {
   liked: 'https://www.youtube.com/playlist?list=LL',
   channels: 'https://www.youtube.com/feed/channels',
 };
-function feed(kind, page = 0, fresh = false) {
+function feedYtdlp(kind, page = 0, fresh = false) {
   return cached(`f:${kind}:${page}`, TTL.feed, async () => {
     if (kind === 'channels') {
       const j = JSON.parse(await ytdlp(['--flat-playlist', '-J', '--playlist-end', '200', FEEDS[kind]]));
@@ -326,6 +326,57 @@ function feed(kind, page = 0, fresh = false) {
     const videos = videoEntries(JSON.parse(await ytdlp(['--flat-playlist', '-J', ...items(page), FEEDS[kind]])));
     return { items: videos, more: videos.length >= PAGE - 2 && page < 30 };
   }, fresh);
+}
+
+// ---------- listas pela API interna do youtube.com (como o app de celular) ----------
+// Trazem o que o yt-dlp não traz nas listas: visualizações e há quanto tempo o vídeo saiu. Se falhar, volta para o yt-dlp.
+// Páginas: a página N só existe depois de ler a N-1 (cada uma traz a ficha da seguinte).
+function webPages(key, page, ttl, endpoint, first, fresh = false) {
+  const get = (p) => cached(`${key}:${p}`, ttl, async () => {
+    if (p === 0) { const j = await first(); return { videos: yt.videosFrom(j), next: yt.nextToken(j) }; }
+    const prev = await get(p - 1);
+    if (!prev.next) return { videos: [], next: '' };
+    const j = await innertube(endpoint, { continuation: prev.next });
+    return { videos: yt.videosFrom(j), next: yt.nextToken(j) };
+  }, fresh && p === 0);
+  return get(page);
+}
+const SEARCH_SP = { video: 'EgIQAQ==', live: 'EgJAAQ==', channel: 'EgIQAg==' };
+async function search(q, withChannels = true, page = 0, live = false) {
+  try {
+    const key = `sw:${live ? 1 : 0}:${q.toLowerCase()}`;
+    const [r, chans] = await Promise.all([
+      webPages(key, page, TTL.search, 'search', () => innertube('search', { query: q, params: live ? SEARCH_SP.live : SEARCH_SP.video })),
+      !withChannels || page > 0 ? [] : cached('swc:' + q.toLowerCase(), TTL.search, async () => yt.channelsFrom(await innertube('search', { query: q, params: SEARCH_SP.channel }))).catch(() => []),
+    ]);
+    if (!r.videos.length && page === 0) throw new Error('vazio');
+    const nq = norm(q);
+    const channels = chans.filter((c) => {
+      const n = norm(c.name), h = norm(c.handle);
+      return nq.length > 1 && n && (n.includes(nq) || nq.includes(n) || h.includes(nq));
+    }).slice(0, 2);
+    for (const c of channels) if (c.avatar) avatars.set(c.id, c.avatar);
+    return { channels, videos: r.videos, more: Boolean(r.next) && page < 20 };
+  } catch {
+    return searchYtdlp(q, withChannels, page, live);
+  }
+}
+const FEED_IDS = { rec: 'FEwhat_to_watch', subs: 'FEsubscriptions', later: 'VLWL', history: 'FEhistory', liked: 'VLLL', channels: 'FEchannels' };
+async function feed(kind, page = 0, fresh = false) {
+  // A API interna precisa do login em cookies.txt (arquivo ou "Entrar com Google"); pelo Firefox, segue o yt-dlp.
+  if (!loggedIn()) return feedYtdlp(kind, page, fresh);
+  try {
+    if (kind === 'channels') {
+      const list = await cached('f:w:channels', TTL.feed, async () => yt.channelsFrom(await innertube('browse', { browseId: FEED_IDS.channels })), fresh);
+      if (!list.length) throw new Error('vazio');
+      return list;
+    }
+    const r = await webPages(`f:w:${kind}`, page, TTL.feed, 'browse', () => innertube('browse', { browseId: FEED_IDS[kind] }), fresh);
+    if (!r.videos.length && page === 0) throw new Error('vazio');
+    return { items: r.videos, more: Boolean(r.next) && page < 30 };
+  } catch {
+    return feedYtdlp(kind, page, fresh);
+  }
 }
 
 // Lives acontecendo agora nos canais pedidos (inscrições feitas só no MeuTube; as da conta já vêm no feed).

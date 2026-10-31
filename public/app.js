@@ -16,7 +16,7 @@ const store = {
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const nf = new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 });
-const big = (n, word) => { const s = nf.format(n); return /mi|bi/.test(s) ? `${s} de ${word}` : `${s} ${word}`; };
+const big = (n, word) => { const s = nf.format(n); return /\s(mi|bi)$/.test(s) ? `${s} de ${word}` : `${s} ${word}`; }; // "1 mi de", mas "27 mil"
 const views = (n) => (n ? big(n, 'visualizações') : '');
 const subsCount = (n) => (n ? big(n, 'inscritos') : '');
 const dur = (s) => {
@@ -26,7 +26,10 @@ const dur = (s) => {
   return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
 };
 const rtf = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
-const ago = (d) => {
+// d: "AAAAMMDD"; ts (opcional): momento exato em ms, para os vídeos de hoje ("há 20 minutos", "há 3 horas").
+const ago = (d, ts) => {
+  const ms = ts ? Date.now() - ts : -1;
+  if (ms >= 0 && ms < 864e5) return ms < 6e4 ? 'agora' : ms < 36e5 ? rtf.format(-Math.round(ms / 6e4), 'minute') : rtf.format(-Math.round(ms / 36e5), 'hour');
   if (!d || d.length !== 8) return '';
   const days = (Date.now() - new Date(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8))) / 864e5;
   if (days < 1) return 'hoje';
@@ -208,7 +211,7 @@ function gridCard(v, i = 0) {
       <div class="card-text">
         <a class="title" href="#/watch/${v.id}" data-watch>${esc(v.title)}</a>
         ${chanLink(v)}
-        <span class="meta">${dot(views(v.views), ago(v.date))}</span>
+        <span class="meta">${dot(v.live ? (v.views ? `${nf.format(v.views)} assistindo` : '') : views(v.views), ago(v.date, v.published))}</span>
       </div>
       ${moreBtn(v)}
     </div>
@@ -220,7 +223,7 @@ function rowCard(v, i = 0) {
     ${moreBtn(v)}
     <div class="row-text">
       <a class="title lg" href="#/watch/${v.id}" data-watch>${esc(v.title)}</a>
-      <span class="meta sm">${dot(views(v.views), ago(v.date))}</span>
+      <span class="meta sm">${dot(v.live ? (v.views ? `${nf.format(v.views)} assistindo` : '') : views(v.views), ago(v.date, v.published))}</span>
       ${v.channel ? `<div class="row-ch">${chanAvatar(v, 'xs')}${chanLink(v, 'meta sm')}</div>` : ''}
       ${v.description ? `<p class="snippet">${esc(v.description)}</p>` : ''}
     </div>
@@ -447,6 +450,7 @@ function route() {
   player = null;
   if (mini && ((watchId && watchId !== mini.info.id) || h.startsWith('/shorts'))) closeMini();
   body.classList.toggle('watching', h.startsWith('/watch/'));
+  if (!h.startsWith('/watch/')) lastPage = location.hash || '#/';
   body.classList.toggle('shorts-mode', h.startsWith('/shorts'));
   body.classList.remove('drawer-open');
   layout();
@@ -517,8 +521,65 @@ function closeMini() {
 $('#minibar')?.addEventListener('click', (e) => {
   if (e.target.closest('[data-mb-close]')) return closeMini();
   if (e.target.closest('[data-mb-toggle]')) { mini?.toggle(); return renderMiniBar(); }
-  if (e.target.closest('[data-mb-open]') && mini) go($('#minibar').dataset.hash);
+  if (e.target.closest('[data-mb-open]') && mini) { history.pushState(null, '', $('#minibar').dataset.hash); route(); }
 });
+
+// Arrastar o vídeo para baixo (no celular): a página do vídeo desce junto com o dedo e, se passar do ponto,
+// vira o miniplayer de baixo e você volta para a tela anterior (como no app do YouTube).
+let lastPage = '#/'; // última tela que não era um vídeo (para onde o gesto volta)
+(() => {
+  let drag = null;
+  let quietUntil = 0;
+  addEventListener('click', (ev) => { if (Date.now() < quietUntil) { ev.stopPropagation(); ev.preventDefault(); } }, true);
+  const view = () => $('.view.watch');
+  const reset = (animate) => {
+    const v = view();
+    if (!v) return;
+    v.style.transition = animate ? 'transform 0.25s var(--out), opacity 0.25s' : '';
+    v.style.transform = '';
+    v.style.opacity = '';
+  };
+  app.addEventListener('touchstart', (e) => {
+    if (!body.classList.contains('watching') || e.touches.length !== 1) return;
+    const p = e.target.closest('.player');
+    // Só pelo vídeo (não pelos controles, nem pela barra de tempo) e com a página no topo.
+    if (!p || e.target.closest('.p-bar, .p-menu, .p-progress') || scrollY > 4 || document.fullscreenElement) return;
+    drag = { x: e.touches[0].clientX, y: e.touches[0].clientY, dy: 0, on: false };
+  }, { passive: true, capture: true });
+  app.addEventListener('touchmove', (e) => {
+    if (!drag) return;
+    const dx = e.touches[0].clientX - drag.x;
+    const dy = e.touches[0].clientY - drag.y;
+    if (!drag.on) {
+      if (Math.abs(dy) < 12 && Math.abs(dx) < 12) return;
+      if (dy <= 0 || Math.abs(dx) > Math.abs(dy)) { drag = null; return; } // para cima ou para o lado: não é o gesto
+      drag.on = true;
+    }
+    e.preventDefault();
+    drag.dy = Math.max(0, dy);
+    const v = view();
+    if (v) {
+      v.style.transition = 'none';
+      v.style.transform = `translateY(${drag.dy}px) scale(${Math.max(0.82, 1 - drag.dy / 1600)})`;
+      v.style.opacity = String(Math.max(0.35, 1 - drag.dy / 600));
+    }
+  }, { passive: false, capture: true });
+  const end = () => {
+    if (!drag) return;
+    const { on, dy } = drag;
+    drag = null;
+    if (!on) return;
+    quietUntil = Date.now() + 450; // o toque que terminou o gesto não deve pausar o vídeo
+    setTimeout(() => reset(false), 400);
+    if (dy > 110) {
+      // Sem a animação de troca de tela: a página já desceu junto com o dedo.
+      history.pushState(null, '', lastPage);
+      route();
+    } else reset(true);
+  };
+  app.addEventListener('touchend', end, true);
+  app.addEventListener('touchcancel', end, true);
+})();
 
 // ---------- Meus vídeos ----------
 // Tudo seu num lugar só: histórico, playlists (assistir mais tarde, curtidos e as suas) e atalhos.
@@ -710,11 +771,15 @@ function shortsView(t) {
 }
 
 // ---------- telas ----------
-const CHIPS = ['Tudo', 'Música', 'Podcasts', 'Games', 'Notícias', 'Ao vivo', 'Ciência', 'Tecnologia', 'Culinária', 'Esportes', 'Humor', 'Viagem', 'Documentários', 'Mixes'];
+const CHIPS = ['Música', 'Podcasts', 'Games', 'Notícias', 'Ao vivo', 'Ciência', 'Tecnologia', 'Culinária', 'Esportes', 'Humor', 'Viagem', 'Documentários', 'Mixes'];
 
+// Ao abrir o MeuTube com a conta conectada, o início sempre começa em "Para você" (depois vale o tema que você escolher).
+let firstHome = true;
+let recFresh = true; // a primeira lista do "Para você" desde que a página abriu vem sempre nova
 function homeView(t) {
   const chips = account.connected ? ['Para você', ...CHIPS] : CHIPS;
   let active = store.get('chip', chips[0]);
+  if (firstHome && account.connected) { active = 'Para você'; firstHome = false; }
   if (!chips.includes(active)) active = chips[0];
   document.title = 'MeuTube';
   $('#q').value = '';
@@ -769,6 +834,17 @@ async function loadSubsTop(t) {
   fresh.forEach((v) => box.querySelector(`[data-vid="${v.id}"] .thumb`)?.insertAdjacentHTML('beforeend', '<span class="new-badge">NOVO</span>'));
 }
 
+// O YouTube repete quase os mesmos recomendados de uma vez para outra. Para cada abertura parecer nova: os vídeos
+// que já apareceram no topo antes vão para o fim, e os que você ainda não viu vêm primeiro, embaralhados.
+function freshFirst(items) {
+  const seen = new Set(store.get('recSeen', []));
+  const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const novos = shuffle(items.filter((v) => !seen.has(v.id) && !v.live));
+  const out = [...items.filter((v) => v.live), ...novos, ...items.filter((v) => seen.has(v.id) && !v.live)];
+  store.set('recSeen', [...out.slice(0, 16).map((v) => v.id), ...seen].slice(0, 300));
+  return out;
+}
+
 async function loadChip(chip, t) {
   store.set('chip', chip);
   $$('[data-chip]').forEach((b) => {
@@ -781,16 +857,19 @@ async function loadChip(chip, t) {
   feed.innerHTML = skGrid();
   const myLoad = ++chipLoad; // trocar de tema no meio do carregamento descarta a resposta antiga
   // Cada tema sabe buscar a página N: recomendações da conta, inscrições locais ou uma busca.
-  const query = chip === 'Tudo' ? 'em alta brasil' : chip === 'Mixes' ? 'mix música brasileira' : chip;
+  const query = chip === 'Mixes' ? 'mix música brasileira' : chip;
   // "Ao vivo" usa o filtro de lives do YouTube: só transmissões acontecendo agora.
   const live = chip === 'Ao vivo' ? '&live=1' : '';
   const searchPage = async (p) => { const r = await api(`/api/search?ch=0&page=${p}${live}&q=${encodeURIComponent(query)}`); return { items: r.videos, more: r.more }; };
-  const load = chip === 'Para você' ? (p) => api(`/api/feed?k=rec&page=${p}`)
-    : chip === 'Tudo' && subs().length ? async (p) => (p === 0 ? { items: await subsFeed(), more: true } : searchPage(p - 1))
+  // "Para você": ao abrir ou recarregar o MeuTube, pede recomendações novas ao YouTube (sem usar a lista guardada).
+  const freshRec = chip === 'Para você' && recFresh;
+  if (freshRec) recFresh = false;
+  const load = chip === 'Para você' ? (p) => api(`/api/feed?k=rec&page=${p}${p === 0 && freshRec ? '&fresh=1' : ''}`)
     : searchPage;
   try {
     const r = await load(0);
     if (t !== token || myLoad !== chipLoad) return;
+    if (freshRec) r.items = freshFirst(r.items);
     feed.innerHTML = r.items.length ? grid(r.items) : empty('film', 'Nada por aqui', 'Tente outro tema.');
     if (r.more) infinite($('#feed .grid'), load, t);
   } catch (e) {
@@ -983,7 +1062,7 @@ async function watchView(id, t, listId) {
   const watching = (n) => `<span id="w-watching">${n ? `${nf.format(n)} assistindo agora` : ''}</span>`;
   const liveSince = info.startedAt ? `ao vivo desde ${new Date(info.startedAt * 1000).toLocaleString('pt-BR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : 'ao vivo';
   $('#w-desc').innerHTML = `<div class="desc" id="desc" tabindex="0" role="button" aria-expanded="false">
-    <div class="d-meta">${info.live ? dot(watching(info.viewers), liveSince) : dot(views(info.views), ago(info.date))}</div>
+    <div class="d-meta">${info.live ? dot(watching(info.viewers), liveSince) : dot(views(info.views), ago(info.date, info.published))}</div>
     <div class="d-text">${linkify(info.description) || 'Sem descrição.'}</div>
     <span class="d-more">...mais</span><span class="d-less">Mostrar menos</span>
   </div>`;
@@ -2367,5 +2446,10 @@ addEventListener('popstate', () => { fromPop = true; route(); });
 $('[data-logo]').innerHTML = logo();
 document.fonts?.ready.then(moveChipInd);
 renderGuide();
-loadAccount().then(() => { if (account.connected && /^(#\/?)?$/.test(location.hash)) route(); if (location.hash === '#/account') accountView(); });
+// A conta chega depois da primeira tela: as telas que dependem dela são desenhadas de novo (vídeo e Shorts não,
+// para não recomeçar o que está tocando).
+loadAccount().then(() => {
+  if (account.connected && /^(#\/?(subs|library|liked|later|history)?)?$/.test(location.hash)) route();
+  if (location.hash === '#/account') accountView();
+});
 route();
