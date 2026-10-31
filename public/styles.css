@@ -1294,3 +1294,20 @@ kbd { min-width: 26px; padding: 3px 7px; border-radius: 7px; background: var(--c
 .new-badge { position: absolute; left: 8px; top: 8px; padding: 2px 7px; border-radius: 6px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 800; letter-spacing: 0.06em; box-shadow: var(--glow); }
 .g-live { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: #ff3b4e; animation: live-pulse 1.8s ease-out infinite; }
 @media (max-width: 791px) { .rail { grid-auto-columns: 78%; margin: 0 -12px; padding: 2px 12px 12px; } }
+
+/* ---------- miniplayer (pop-up) ---------- */
+body.pip-doc { margin: 0; min-height: 0; background: #000; overflow: hidden; }
+.pip-doc .player { position: fixed; inset: 0; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
+.pip-doc .player [data-a="fs"], .pip-doc .player [data-a="next"], .pip-doc .p-vol input { display: none; }
+.pip-doc .p-big svg { width: 26px; height: 26px; }
+.pip-slot {
+  display: grid; place-items: center; align-content: center; gap: 6px; width: 100%; aspect-ratio: 16 / 9; border-radius: 16px;
+  background: radial-gradient(circle at 50% 40%, rgba(56, 198, 255, 0.14), transparent 60%), #05080d; color: var(--text-2);
+  border: 1px dashed rgba(56, 198, 255, 0.35); transition: background 0.25s;
+}
+.pip-slot:hover { background: radial-gradient(circle at 50% 40%, rgba(56, 198, 255, 0.22), transparent 60%), #05080d; color: var(--text); }
+.pip-slot svg { color: var(--v2); margin-bottom: 6px; }
+.pip-slot b { font-size: 17px; color: var(--text); }
+.player.in-pip:not(.pip-doc .player)::after {
+  content: "Tocando no miniplayer"; position: absolute; inset: 0; display: grid; place-items: center; background: #05080d; color: var(--text-2); font-weight: 700;
+}

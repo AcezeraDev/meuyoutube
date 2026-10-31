@@ -1,0 +1,13 @@
+{
+  "appId": "br.meutube.app",
+  "appName": "MeuTube",
+  "webDir": "www",
+  "backgroundColor": "#070b12",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "CapacitorHttp": { "enabled": true },
+    "CapacitorCookies": { "enabled": true }
+  }
+}

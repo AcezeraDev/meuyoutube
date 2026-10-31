@@ -392,6 +392,7 @@ function toggleGuide() {
 // ---------- navegação ----------
 let token = 0;
 let player = null;
+let mini = null; // player que ficou no miniplayer depois que você saiu da página dele
 
 function go(hash, fromEl) {
   body.classList.remove('drawer-open');
@@ -425,9 +426,13 @@ function route() {
   const restore = fromPop ? scrollPos.get(location.hash) : 0;
   fromPop = false;
   closePopups();
-  player?.destroy();
-  player = null;
   const h = location.hash.slice(1) || '/';
+  // Vídeo no miniplayer continua tocando enquanto você navega; abrir outro vídeo substitui o que estava nele.
+  const watchId = h.match(/^\/watch\/([\w-]{11})/)?.[1];
+  if (player?.pipWin) { mini?.destroy(); mini = player; mini.opts.onEnded = mini.opts.onNext = null; }
+  else player?.destroy();
+  player = null;
+  if (mini && watchId && watchId !== mini.info.id) { mini.destroy(); mini = null; }
   body.classList.toggle('watching', h.startsWith('/watch/'));
   body.classList.remove('drawer-open');
   layout();
@@ -761,7 +766,15 @@ async function watchView(id, t, listId) {
       else if (fresh) toast('Fim da playlist');
     };
     const p = progress()[id];
-    player = new Player(el, info, {
+    // Voltou para o vídeo que estava no miniplayer: ele volta para a página, sem recomeçar.
+    if (mini && mini.info.id === id) {
+      player = mini;
+      mini = null;
+      Object.assign(player.opts, { onNext: next, onEnded: () => { if (pl || $('#autoplay')?.checked) next(); } });
+      player.dock(el);
+    } else player = new Player(el, info, {
+      onPipBack: () => { if (mini?.info.id === id) go(`#/watch/${id}${pl ? `?list=${pl.id}` : ''}`); else player?.exitPip(); },
+      onPipClosed: () => { if (mini?.info.id === id) { mini.destroy(); mini = null; } },
       start: p && p.d - p.t > 15 ? p.t : 0,
       rate: lib.channelSpeed(info.channelId),
       onNext: next,

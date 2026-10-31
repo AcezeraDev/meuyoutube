@@ -15,13 +15,17 @@ const SLEEP = [0, 5, 15, 30, 45, 60, -1]; // minutos; -1 = no fim do vídeo
 const DRIFT = 0.3;
 // Lives chegam em HLS; Chrome/Brave/Edge não tocam HLS sozinhos, então o hls.js é carregado só ao abrir uma live.
 const HLS_JS = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.mjs';
+// Miniplayer: no Chrome/Brave/Edge do PC o player inteiro vai para uma janelinha flutuante (com os nossos controles,
+// e continua tocando enquanto você navega pelo site). Nos outros, o pop-up simples de vídeo do navegador.
+const DOC_PIP = 'documentPictureInPicture' in window;
+const PIP_OK = DOC_PIP || Boolean(document.pictureInPictureEnabled);
 export const SEG_NAMES = { sponsor: 'Patrocínio', selfpromo: 'Autopromoção', interaction: 'Pedido de inscrição', intro: 'Abertura', outro: 'Encerramento', music_offtopic: 'Trecho sem música' };
 
 export class Player {
-  constructor(root, info, { start = 0, rate = 1, onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle } = {}) {
+  constructor(root, info, { start = 0, rate = 1, onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle, onPipBack, onPipClosed } = {}) {
     this.root = root;
     this.info = info;
-    this.opts = { onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle };
+    this.opts = { onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle, onPipBack, onPipClosed };
     // Só oferece qualidades que este navegador consegue tocar (o 2K vem em VP9/AV1). Padrão: a maior até 2K.
     const probe = document.createElement('video');
     const playable = info.qualities.filter((q) => !q.type || probe.canPlayType(q.type));
@@ -73,6 +77,7 @@ export class Player {
             <button class="p-gear" data-a="menu" aria-label="Configurações" aria-expanded="false">${icon('gear', 22)}</button>
             <div class="p-menu" role="menu" hidden></div>
           </div>
+          ${PIP_OK ? `<button data-a="pip" aria-label="Miniplayer (tecla I)" title="Miniplayer (I)">${icon('pip', 20)}</button>` : ''}
           <button data-a="fs" aria-label="Tela cheia">${icon('maximize', 20)}</button>
         </div>
       </div>`);
@@ -140,6 +145,79 @@ export class Player {
     hls.loadSource(src);
     hls.attachMedia(this.v);
   }
+  // ---------- miniplayer (pop-up) ----------
+  get inPip() { return Boolean(this.pipWin) || document.pictureInPictureElement === this.v; }
+  async togglePip() {
+    if (this.inPip) {
+      // Dentro do pop-up, o botão traz o vídeo de volta para a página dele.
+      if (this.pipWin && this.opts.onPipBack) return this.opts.onPipBack();
+      return this.exitPip();
+    }
+    try {
+      if (this.audioOnly) this.setAudioOnly(false, false);
+      if (DOC_PIP) {
+        try { return await this.openDocPip(); } catch {} // sem janelinha completa: cai no pop-up simples do vídeo
+      }
+      if (this.v.readyState < 1) await new Promise((r) => this.v.addEventListener('loadedmetadata', r, { once: true }));
+      await this.v.requestPictureInPicture();
+    } catch {
+      this.chip('Não consegui abrir o miniplayer');
+    }
+  }
+  async openDocPip() {
+    const ratio = this.v.videoWidth && this.v.videoHeight ? this.v.videoHeight / this.v.videoWidth : 9 / 16;
+    const win = await window.documentPictureInPicture.requestWindow({ width: 480, height: Math.round(480 * ratio) });
+    // Leva os estilos do site para a janelinha (as fontes externas vão como link).
+    for (const sheet of document.styleSheets) {
+      try {
+        const style = win.document.createElement('style');
+        style.textContent = [...sheet.cssRules].map((r) => r.cssText).join('\n');
+        win.document.head.append(style);
+      } catch {
+        if (sheet.href) win.document.head.append(Object.assign(win.document.createElement('link'), { rel: 'stylesheet', href: sheet.href }));
+      }
+    }
+    win.document.title = this.info.title;
+    win.document.body.className = 'pip-doc';
+    // No lugar do player fica um aviso; clicar nele traz o vídeo de volta.
+    this.slot = document.createElement('button');
+    this.slot.className = 'pip-slot';
+    this.slot.innerHTML = `${icon('pip', 40)}<b>Tocando no miniplayer</b><span>Clique para trazer o vídeo de volta</span>`;
+    this.slot.addEventListener('click', () => this.exitPip());
+    this.root.replaceWith(this.slot);
+    win.document.body.append(this.root);
+    this.root.classList.add('in-pip');
+    this.pipWin = win;
+    win.document.addEventListener('keydown', this.onKey);
+    win.addEventListener('pagehide', () => this.pipClosed(), { once: true });
+    if (this.playing && this.v.paused) this.v.play().catch(() => {});
+  }
+  // A janelinha fechou (pelo X ou pelo "voltar"): o player volta para o lugar dele, se ele ainda existir.
+  pipClosed() {
+    const win = this.pipWin;
+    if (!win) return;
+    this.pipWin = null;
+    win.document.removeEventListener('keydown', this.onKey);
+    this.root.classList.remove('in-pip');
+    if (this.slot?.isConnected) {
+      this.slot.replaceWith(this.root);
+      if (this.playing && this.v.paused) this.v.play().catch(() => {});
+    } else {
+      this.opts.onPipClosed?.(); // você já estava em outra página: fechar o pop-up para o vídeo
+    }
+    this.slot = null;
+  }
+  exitPip() {
+    if (this.pipWin) this.pipWin.close();
+    else if (document.pictureInPictureElement === this.v) document.exitPictureInPicture().catch(() => {});
+  }
+  // Volta da janelinha para uma página nova do mesmo vídeo (você navegou e voltou para ele).
+  dock(el) {
+    if (this.slot) this.slot.replaceWith(el);
+    this.slot = el;
+    this.exitPip();
+  }
+
   // Pula para o momento atual da transmissão.
   goLive() {
     const edge = this.hls?.liveSyncPosition ?? (this.v.seekable.length ? this.v.seekable.end(this.v.seekable.length - 1) - 3 : null);
@@ -408,6 +486,8 @@ export class Player {
     on(v, 'ended', ended);
     on(v, 'seeking', () => { this.endedFired = false; });
     on(v, 'error', () => { if (!this.audioOnly) this.recover(); });
+    on(v, 'enterpictureinpicture', () => this.root.classList.add('in-pip'));
+    on(v, 'leavepictureinpicture', () => this.root.classList.remove('in-pip'));
     if (a) {
       // O vídeo manda; se o áudio engasgar, ele se recupera sozinho (pausar o vídeo aqui criava um ciclo de pausa/play).
       on(a, 'ended', () => { if (v.paused || this.audioOnly) ended(); });
@@ -437,6 +517,7 @@ export class Player {
         if (act === 'toggle') this.toggle();
         if (act === 'next') this.opts.onNext?.();
         if (act === 'golive') this.goLive();
+        if (act === 'pip') this.togglePip();
         if (act === 'mute') { this.out.muted = !this.out.muted; this.renderVolume(); }
         if (act === 'fs') this.fullscreen();
         if (act === 'menu') this.toggleMenu();
@@ -517,6 +598,7 @@ export class Player {
         f: () => this.fullscreen(),
         n: () => this.opts.onNext?.(),
         s: () => this.screenshot(),
+        i: () => { if (PIP_OK) this.togglePip(); },
         '>': () => stepRate(1), '<': () => stepRate(-1),
       }[k];
       if (!act) return;
@@ -545,7 +627,7 @@ export class Player {
   // Mantém o áudio colado no vídeo; corrige quando a diferença passa de 0,3 s.
   syncAudio(forcePlay) {
     const { v, a } = this;
-    if (!a || this.audioOnly || v.paused || document.hidden) return;
+    if (!a || this.audioOnly || v.paused || (document.hidden && !this.inPip)) return;
     // Corrige no máximo a cada 1,5 s: cada correção faz o áudio recarregar um instante.
     const now = performance.now();
     if (Math.abs(a.currentTime - v.currentTime) > DRIFT && now - (this.lastFix || 0) > 1500) {
@@ -742,10 +824,14 @@ export class Player {
     ms.setActionHandler('seekbackward', () => this.seek(this.now - 10));
     ms.setActionHandler('seekforward', () => this.seek(this.now + 10));
     ms.setActionHandler('nexttrack', this.opts.onNext ? () => this.opts.onNext() : null);
+    // Chrome pode abrir o miniplayer sozinho quando você troca de aba com o vídeo tocando.
+    try { if (PIP_OK) ms.setActionHandler('enterpictureinpicture', () => { if (!this.inPip) this.togglePip(); }); } catch {}
   }
 
   destroy() {
     this.destroyed = true;
+    this.opts.onPipClosed = null;
+    this.exitPip();
     if (this.watchAcc > 1) this.opts.onTick?.(Math.round(this.watchAcc));
     clearTimeout(this.idleTimer);
     clearInterval(this.sleepTimer);
