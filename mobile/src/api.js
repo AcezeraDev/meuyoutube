@@ -3,7 +3,7 @@
 // para guardar dados (no celular, o fetch nativo do Capacitor e o localStorage; nos testes, o Node).
 //
 // Divisão do trabalho:
-// - links de vídeo: youtubei.js com o cliente ANDROID_VR (links diretos do googlevideo, sem decifrar nada);
+// - links de vídeo: youtubei.js com o cliente VISIONOS (links diretos do googlevideo, sem decifrar nada; lives pelo ANDROID_VR);
 // - todo o resto (busca, canais, feeds, comentários, chat, perfil): a API interna do youtube.com pelo lib/yt-web.js,
 //   a mesma do servidor do PC, com o login por cookies.
 import { Innertube } from 'youtubei.js';
@@ -393,10 +393,15 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
   function video(id, fresh = false) {
     // Os links do googlevideo valem umas 6 horas; guarda por 1 hora.
     return cached('v:' + id, 60 * MIN, async () => {
-      const [basic, n] = await Promise.all([
-        yt().then((y) => y.getBasicInfo(id, { client: 'ANDROID_VR' })),
-        innertube('next', { videoId: id }).catch(() => null),
-      ]);
+      // VISIONOS: links diretos que valem para o vídeo inteiro. O ANDROID_VR (sem o "PO token") só libera o primeiro
+      // minuto de cada arquivo, então fica para as lives (HLS) e como reserva.
+      const links = async () => {
+        const y = await yt();
+        const vision = await y.getBasicInfo(id, { client: 'VISIONOS' }).catch(() => null);
+        if (vision?.streaming_data?.adaptive_formats?.some((f) => f.url) && !vision.basic_info?.is_live) return vision;
+        return y.getBasicInfo(id, { client: 'ANDROID_VR' });
+      };
+      const [basic, n] = await Promise.all([links(), innertube('next', { videoId: id }).catch(() => null)]);
       const bi = basic.basic_info || {};
       const sd = basic.streaming_data;
       const ps = basic.playability_status || {};

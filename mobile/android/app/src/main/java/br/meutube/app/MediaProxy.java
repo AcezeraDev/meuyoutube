@@ -19,10 +19,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 // Mini-servidor dentro do celular (só 127.0.0.1, ninguém de fora acessa) que entrega os vídeos do YouTube ao player.
-// O YouTube só aceita pedidos de até ~5 MB por vez e o player pede "do byte X até o fim"; aqui cada pedido vira um
-// pedaço de 4 MB (resposta 206) e o player pede o próximo sozinho. É o mesmo que o /media do servidor do PC faz.
+// O YouTube só aceita pedidos de até ~1 minuto de mídia por vez e o player pede "do byte X até o fim"; aqui cada
+// pedido vira um pedaço de ~30 s (resposta 206) e o player pede o próximo sozinho. O limite é por duração: no som,
+// que tem poucos bytes por segundo, 2 MB já passam de 2 minutos e são recusados.
 final class MediaProxy {
-    private static final long CHUNK = 4L * 1024 * 1024;
+    private static final long MAX_CHUNK = 4L * 1024 * 1024;
+    private static final long MIN_CHUNK = 256L * 1024;
+    private static final double CHUNK_SECONDS = 30;
     private static final Pattern RANGE = Pattern.compile("bytes=(\\d+)-(\\d*)");
     private static MediaProxy instance;
 
@@ -100,7 +103,7 @@ final class MediaProxy {
                 write(out, "416 Range Not Satisfiable", "text/plain", "Content-Range: bytes */" + total + "\r\n", 0);
                 return;
             }
-            end = Math.min(end, start + CHUNK - 1);
+            end = Math.min(end, start + chunkSize(u, total) - 1);
 
             HttpURLConnection c = (HttpURLConnection) new URL(target).openConnection();
             c.setRequestProperty("Range", "bytes=" + start + "-" + end);
@@ -125,6 +128,15 @@ final class MediaProxy {
         } catch (Exception ignored) {
             // O player cancelou (trocou de qualidade, pulou o vídeo...) ou a rede caiu: ele pede de novo se precisar.
         }
+    }
+
+    // Bytes de ~30 s desta faixa (tamanho total ÷ duração, que vêm no próprio link: clen e dur).
+    private static long chunkSize(Uri u, long total) {
+        double dur = 0;
+        try { dur = Double.parseDouble(u.getQueryParameter("dur")); } catch (Exception ignored) {}
+        if (total <= 0 || dur <= 0) return MIN_CHUNK * 4;
+        long bytes = (long) (total / dur * CHUNK_SECONDS);
+        return Math.max(MIN_CHUNK, Math.min(MAX_CHUNK, bytes));
     }
 
     private static void write(OutputStream out, String status, String type, String extra, long len) throws Exception {

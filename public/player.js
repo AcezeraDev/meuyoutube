@@ -248,7 +248,8 @@ export class Player {
   // Elemento que toca o som (áudio separado ou o próprio vídeo, no plano B).
   get out() { return this.a || this.v; }
   // Com áudio separado, "tocando" é o som (a imagem pode estar pausada pelo navegador ou no modo só áudio).
-  get playing() { return this.a ? !this.a.paused : !this.v.paused; }
+  // Se o som deu erro, quem diz se está tocando é a imagem (senão o botão de "tocar" fica na tela com o vídeo andando).
+  get playing() { return this.a && !this.a.error ? !this.a.paused : !this.v.paused; }
   // Tempo atual: segue o som quando a imagem não está andando.
   get now() { return this.a && (this.audioOnly || (this.v.paused && !this.a.paused)) ? this.a.currentTime : this.v.currentTime; }
   get duration() { return this.v.duration || this.a?.duration || this.info.duration || 0; }
