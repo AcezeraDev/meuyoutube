@@ -1,0 +1,765 @@
+// Player próprio: o YouTube entrega vídeo e áudio separados, então tocamos os dois em sincronia.
+// Extras que o YouTube não tem: modo só áudio, repetir trecho A-B, timer para dormir, capturar quadro,
+// pular patrocínios (SponsorBlock), marcas dos seus momentos e velocidade até 3x lembrada por canal.
+import { icon } from './icons.js';
+
+const time = (s) => {
+  s = Math.max(0, Math.floor(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
+};
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+const SLEEP = [0, 5, 15, 30, 45, 60, -1]; // minutos; -1 = no fim do vídeo
+const DRIFT = 0.3;
+// Lives chegam em HLS; Chrome/Brave/Edge não tocam HLS sozinhos, então o hls.js é carregado só ao abrir uma live.
+const HLS_JS = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.mjs';
+export const SEG_NAMES = { sponsor: 'Patrocínio', selfpromo: 'Autopromoção', interaction: 'Pedido de inscrição', intro: 'Abertura', outro: 'Encerramento', music_offtopic: 'Trecho sem música' };
+
+export class Player {
+  constructor(root, info, { start = 0, rate = 1, onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle } = {}) {
+    this.root = root;
+    this.info = info;
+    this.opts = { onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle };
+    // Só oferece qualidades que este navegador consegue tocar (o 2K vem em VP9/AV1). Padrão: a maior até 2K.
+    const probe = document.createElement('video');
+    const playable = info.qualities.filter((q) => !q.type || probe.canPlayType(q.type));
+    if (playable.length) info.qualities = playable;
+    const pref = load('quality2k', 1440);
+    this.quality = info.qualities.find((q) => q.height <= pref) || info.qualities[info.qualities.length - 1];
+    this.lastSave = 0;
+    this.retried = false;
+    this.segments = [];
+    this.skipSegments = true;
+    this.marks = [];
+    this.loopA = null;
+    this.loopB = null;
+    this.loopAll = false;
+    this.sleep = 0;
+    this.watchAcc = 0;
+    this.live = Boolean(info.live);
+    root.classList.toggle('live', this.live);
+
+    root.insertAdjacentHTML('beforeend', `
+      <video playsinline preload="auto"></video>
+      <div class="p-audio-art" aria-hidden="true">
+        <img src="https://i.ytimg.com/vi/${info.id}/hqdefault.jpg" alt="">
+        <div class="eq"><i></i><i></i><i></i><i></i><i></i></div>
+        <span>Modo só áudio · economizando dados</span>
+      </div>
+      <div class="p-shade"></div>
+      <button class="p-big" data-a="toggle" aria-label="Reproduzir">${icon('play', 34)}</button>
+      <div class="p-spin" aria-hidden="true"></div>
+      <div class="p-bezel" aria-hidden="true"></div>
+      <div class="p-chip" aria-live="polite"></div>
+      <div class="p-bar">
+        <div class="p-progress" role="slider" tabindex="0" aria-label="Posição do vídeo" aria-valuemin="0">
+          <div class="p-buf"></div><div class="p-marks"></div><div class="p-played"></div><div class="p-knob"></div><div class="p-tip"></div>
+        </div>
+        <div class="p-row">
+          <button data-a="toggle" aria-label="Reproduzir">${icon('play', 22)}</button>
+          ${onNext ? `<button data-a="next" aria-label="Próximo vídeo">${icon('next', 20)}</button>` : ''}
+          <div class="p-vol">
+            <button data-a="mute" aria-label="Silenciar">${icon('volume', 21)}</button>
+            <input type="range" min="0" max="1" step="0.02" aria-label="Volume">
+          </div>
+          ${this.live
+            ? '<button class="p-live" data-a="golive" title="Ir para o momento atual da live"><i></i>AO VIVO</button>'
+            : `<span class="p-time">0:00 / ${time(info.duration)}</span>`}
+          <span class="grow"></span>
+          <span class="p-badges"></span>
+          <div class="p-menu-wrap">
+            <button class="p-gear" data-a="menu" aria-label="Configurações" aria-expanded="false">${icon('gear', 22)}</button>
+            <div class="p-menu" role="menu" hidden></div>
+          </div>
+          <button data-a="fs" aria-label="Tela cheia">${icon('maximize', 20)}</button>
+        </div>
+      </div>`);
+
+    const $ = (s) => root.querySelector(s);
+    this.v = $('video');
+    this.bar = $('.p-progress');
+    this.played = $('.p-played');
+    this.buf = $('.p-buf');
+    this.knob = $('.p-knob');
+    this.tip = $('.p-tip');
+    this.timeEl = $('.p-time');
+    this.volInput = $('.p-vol input');
+    this.menu = $('.p-menu');
+    this.bezelEl = $('.p-bezel');
+    this.chipEl = $('.p-chip');
+    this.marksEl = $('.p-marks');
+    this.badgesEl = $('.p-badges');
+
+    this.a = info.audio ? new Audio() : null;
+    this.audioSrc = info.audio;
+    const vol = load('volume', { v: 1, m: false });
+    if (this.a) {
+      this.a.preload = 'auto';
+      this.a.src = this.audioSrc;
+      this.v.muted = true;
+    }
+    this.out.volume = vol.v;
+    this.out.muted = vol.m;
+    // Se o modo só áudio ficou ligado da última vez, nem carrega a imagem.
+    this.audioOnly = Boolean(this.a && load('audioOnly', false));
+    root.classList.toggle('audio-only', this.audioOnly);
+    if (!this.audioOnly) this.setSrc(this.quality.src);
+    (this.audioOnly ? this.a : this.v).addEventListener('loadedmetadata', () => {
+      if (start > 0) this.seek(start);
+      if (rate !== 1) this.setRate(rate, false);
+    }, { once: true });
+
+    this.bind();
+    this.renderVolume();
+    this.renderBadges();
+    this.mediaSession();
+    this.play();
+  }
+
+  // Põe a fonte no <video>: arquivo comum direto; live (HLS) pelo hls.js, que escolhe a qualidade sozinho.
+  async setSrc(src) {
+    if (!this.quality.hls) { this.v.src = src; return; }
+    const Hls = window.MediaSource ? (await import(HLS_JS).catch(() => ({}))).default : null;
+    if (this.destroyed) return;
+    if (!Hls?.isSupported()) { this.v.src = src; return; } // Safari e celulares tocam HLS sozinhos
+    this.hls?.destroy();
+    const hls = (this.hls = new Hls({ liveSyncDurationCount: 3, backBufferLength: 90, maxBufferLength: 30 }));
+    let netFails = 0;
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { if (!this.userPaused) this.v.play().catch(() => {}); this.renderBadges(); });
+    hls.on(Hls.Events.LEVEL_SWITCHED, () => this.renderBadges());
+    hls.on(Hls.Events.FRAG_LOADED, () => { netFails = 0; });
+    hls.on(Hls.Events.ERROR, (e, d) => {
+      if (!d.fatal) return;
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return hls.recoverMediaError();
+      // Rede: tenta continuar; se insistir, pede links novos ao servidor (a lista da live pode ter vencido).
+      if (++netFails <= 3) return setTimeout(() => hls.startLoad(), 1500 * netFails);
+      this.recover();
+    });
+    hls.loadSource(src);
+    hls.attachMedia(this.v);
+  }
+  // Pula para o momento atual da transmissão.
+  goLive() {
+    const edge = this.hls?.liveSyncPosition ?? (this.v.seekable.length ? this.v.seekable.end(this.v.seekable.length - 1) - 3 : null);
+    if (edge != null) this.v.currentTime = edge;
+    if (!this.playing) this.play();
+  }
+
+  // Elemento que toca o som (áudio separado ou o próprio vídeo, no plano B).
+  get out() { return this.a || this.v; }
+  // Com áudio separado, "tocando" é o som (a imagem pode estar pausada pelo navegador ou no modo só áudio).
+  get playing() { return this.a ? !this.a.paused : !this.v.paused; }
+  // Tempo atual: segue o som quando a imagem não está andando.
+  get now() { return this.a && (this.audioOnly || (this.v.paused && !this.a.paused)) ? this.a.currentTime : this.v.currentTime; }
+  get duration() { return this.v.duration || this.a?.duration || this.info.duration || 0; }
+
+  play() {
+    this.userPaused = false;
+    this.endedFired = false;
+    this.root.classList.add('loading');
+    if (this.a) {
+      if (!this.audioOnly) this.a.currentTime = this.v.currentTime;
+      this.a.play().then(() => this.root.classList.remove('loading')).catch(() => {});
+    }
+    if (this.audioOnly) return;
+    this.v.play().catch(() => {
+      this.root.classList.remove('loading');
+      this.renderState();
+    });
+  }
+  pause() {
+    this.userPaused = true;
+    this.v.pause();
+    this.a?.pause();
+  }
+  toggle() {
+    const pausing = this.playing && !this.v.ended;
+    pausing ? this.pause() : this.play();
+    this.bezel(pausing ? 'pause' : 'play');
+  }
+
+  // Ícone que aparece no centro e some (como no YouTube).
+  bezel(name, text = '') {
+    const b = this.bezelEl;
+    b.innerHTML = `<span>${icon(name, 30)}${text ? `<b>${text}</b>` : ''}</span>`;
+    b.classList.remove('show');
+    void b.offsetWidth;
+    b.classList.add('show');
+  }
+  // Aviso curto dentro do player (ex.: "Patrocínio pulado").
+  chip(text) {
+    this.chipEl.textContent = text;
+    this.chipEl.classList.remove('show');
+    void this.chipEl.offsetWidth;
+    this.chipEl.classList.add('show');
+  }
+
+  setAudio(src) {
+    if (!this.a || src === this.audioSrc) return;
+    const t = this.now;
+    const playing = this.playing;
+    this.audioSrc = src;
+    this.a.src = src;
+    this.a.addEventListener('loadedmetadata', () => {
+      this.a.currentTime = t;
+      this.a.playbackRate = this.v.playbackRate;
+      if (playing) this.a.play().catch(() => {});
+    }, { once: true });
+  }
+  seek(t) {
+    t = Math.min(Math.max(0, t), this.duration - 0.2);
+    if (!this.audioOnly) this.v.currentTime = t;
+    if (this.a) this.a.currentTime = t;
+    this.lastT = t;
+    this.renderTime();
+  }
+  setRate(r, remember = true) {
+    this.v.playbackRate = r;
+    if (this.a) this.a.playbackRate = r;
+    if (remember) this.opts.onRate?.(r);
+    this.renderBadges();
+  }
+
+  // ---------- modo só áudio: descarta a imagem (economiza dados) e toca só o som ----------
+  setAudioOnly(on, notify = true) {
+    if (!this.a || on === !!this.audioOnly) return;
+    const t = this.now;
+    const playing = this.playing;
+    this.audioOnly = on;
+    save('audioOnly', on);
+    this.root.classList.toggle('audio-only', on);
+    if (on) {
+      this.v.pause();
+      this.v.removeAttribute('src');
+      this.v.load();
+      this.a.currentTime = t;
+      if (playing) this.a.play().catch(() => {});
+    } else {
+      this.v.src = this.quality.src;
+      this.v.addEventListener('loadedmetadata', () => {
+        this.v.playbackRate = this.a.playbackRate;
+        this.v.currentTime = this.a.currentTime;
+        if (this.playing) this.v.play().catch(() => {});
+      }, { once: true });
+    }
+    if (notify) this.chip(on ? 'Modo só áudio ligado' : 'Vídeo de volta');
+    this.renderBadges();
+  }
+
+  // ---------- capturar quadro: salva a imagem atual do vídeo em PNG ----------
+  screenshot() {
+    if (this.audioOnly || !this.v.videoWidth) return this.chip('Ligue o vídeo para capturar');
+    const c = document.createElement('canvas');
+    c.width = this.v.videoWidth;
+    c.height = this.v.videoHeight;
+    c.getContext('2d').drawImage(this.v, 0, 0);
+    c.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${this.info.title.replace(/[\\/:*?"<>|]+/g, ' ').slice(0, 80)} - ${time(this.now).replace(/:/g, '-')}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      this.bezel('camera');
+      this.opts.onToast?.('Quadro salvo em PNG');
+    }, 'image/png');
+  }
+
+  // ---------- repetir trecho A-B ----------
+  setLoop(kind) {
+    const t = this.now;
+    if (kind === 'a') { this.loopA = t; if (this.loopB != null && this.loopB <= t) this.loopB = null; this.chip(`Início do trecho: ${time(t)}`); }
+    if (kind === 'b') {
+      if (this.loopA == null) this.loopA = 0;
+      if (t <= this.loopA + 0.5) return this.chip('O fim precisa vir depois do início');
+      this.loopB = t;
+      this.chip(`Repetindo ${time(this.loopA)} – ${time(t)}`);
+      this.seek(this.loopA);
+    }
+    if (kind === 'all') { this.loopAll = !this.loopAll; this.loopA = this.loopB = null; this.chip(this.loopAll ? 'Repetindo o vídeo' : 'Repetição desligada'); }
+    if (kind === 'off') { this.loopA = this.loopB = null; this.loopAll = false; this.chip('Repetição desligada'); }
+    this.renderMarks();
+    this.renderBadges();
+  }
+
+  // ---------- timer para dormir ----------
+  setSleep(min) {
+    clearInterval(this.sleepTimer);
+    this.sleep = min;
+    this.sleepAt = min > 0 ? Date.now() + min * 60000 : 0;
+    if (min > 0) {
+      this.sleepTimer = setInterval(() => {
+        if (Date.now() >= this.sleepAt) {
+          clearInterval(this.sleepTimer);
+          this.sleep = 0;
+          this.fadeOutAndPause();
+        }
+        this.renderBadges();
+      }, 1000);
+    }
+    this.chip(min > 0 ? `Pausa em ${min} min` : min === -1 ? 'Pausa no fim do vídeo' : 'Timer desligado');
+    this.renderBadges();
+  }
+  // Abaixa o volume aos poucos antes de pausar (mais gostoso para dormir).
+  fadeOutAndPause() {
+    const o = this.out;
+    const start = o.volume;
+    let i = 0;
+    const step = setInterval(() => {
+      i++;
+      o.volume = Math.max(0, start * (1 - i / 20));
+      if (i >= 20) {
+        clearInterval(step);
+        this.pause();
+        o.volume = start;
+        this.opts.onToast?.('Boa noite! O timer pausou o vídeo.');
+        this.renderBadges();
+      }
+    }, 150);
+  }
+
+  // ---------- trechos do SponsorBlock e marcas dos seus momentos ----------
+  setSegments(list, enabled) {
+    this.segments = list || [];
+    this.skipSegments = enabled;
+    this.renderMarks();
+  }
+  setMarks(list) {
+    this.marks = list || [];
+    this.renderMarks();
+  }
+  renderMarks() {
+    const d = this.duration;
+    if (!d) { this.v.addEventListener('loadedmetadata', () => this.renderMarks(), { once: true }); return; }
+    const pct = (t) => `${(Math.min(t, d) / d) * 100}%`;
+    this.marksEl.innerHTML = [
+      ...this.segments.map((s) => `<i class="seg seg-${s.category}" style="left:${pct(s.start)};width:calc(${pct(s.end)} - ${pct(s.start)})" title="${SEG_NAMES[s.category] || s.category}"></i>`),
+      ...this.marks.map((m) => `<i class="mk" style="left:${pct(m.t)}" title="${(m.note || time(m.t)).replace(/"/g, '&quot;')}"></i>`),
+      this.loopA != null && this.loopB != null ? `<i class="ab" style="left:${pct(this.loopA)};width:calc(${pct(this.loopB)} - ${pct(this.loopA)})"></i>` : '',
+    ].join('');
+  }
+
+  // Selos ao lado da engrenagem: mostram o que está ligado.
+  renderBadges() {
+    const b = [];
+    const r = this.v.playbackRate;
+    if (r !== 1) b.push(`${String(r).replace('.', ',')}x`);
+    if (this.audioOnly) b.push(icon('headphones', 14));
+    if (this.loopAll || this.loopB != null) b.push(icon('repeat', 14));
+    if (this.sleep > 0) b.push(`${icon('moon', 14)} ${Math.max(1, Math.ceil((this.sleepAt - Date.now()) / 60000))}m`);
+    if (this.sleep === -1) b.push(icon('moon', 14));
+    this.badgesEl.innerHTML = b.map((x) => `<span>${x}</span>`).join('');
+  }
+
+  // Executado a cada atualização de tempo (da imagem ou, no modo só áudio, do som).
+  tick() {
+    const t = this.now;
+    this.renderTime();
+    this.syncAudio(false);
+    // Repetir trecho A-B
+    if (this.loopB != null && t >= this.loopB) { this.seek(this.loopA); return; }
+    // Pular patrocínios: só quando a reprodução entra no trecho (se você voltar de propósito, ele deixa).
+    if (this.skipSegments && this.playing) {
+      const prev = this.lastT ?? t;
+      const seg = this.segments.find((s) => prev <= s.start + 0.25 && t >= s.start && t < s.end - 0.3);
+      if (seg) {
+        this.seek(seg.end);
+        this.chip(`${SEG_NAMES[seg.category] || 'Trecho'} pulado`);
+      }
+    }
+    // Tempo assistido de verdade (para as estatísticas): conta só enquanto toca, em passos pequenos.
+    if (this.playing && this.lastT != null && t > this.lastT && t - this.lastT < 2) {
+      this.watchAcc += (t - this.lastT) / (this.v.playbackRate || 1);
+      if (this.watchAcc >= 10) { this.opts.onTick?.(Math.round(this.watchAcc)); this.watchAcc = 0; }
+    }
+    this.lastT = t;
+    const now = Date.now();
+    if (now - this.lastSave > 4000) { this.lastSave = now; this.opts.onProgress?.(t, this.duration); }
+  }
+
+  bind() {
+    const { v, a } = this;
+    const on = (el, ev, fn) => el.addEventListener(ev, fn);
+
+    // Em segundo plano o navegador pausa vídeos sem som "para economizar energia". Só a pausa pedida por você
+    // para o áudio; qualquer outra mantém o som tocando e a imagem alcança quando a aba volta ao foco.
+    const browserPause = () => !this.userPaused && !v.ended;
+    on(v, 'play', () => { this.syncAudio(true); this.renderState(); this.wake(); });
+    on(v, 'pause', () => { if (a && !browserPause()) a.pause(); this.renderState(); this.wake(); });
+    on(v, 'waiting', () => { this.root.classList.add('loading'); if (!browserPause()) a?.pause(); });
+    on(v, 'playing', () => { this.root.classList.remove('loading'); this.syncAudio(true); });
+    on(v, 'canplay', () => this.root.classList.remove('loading'));
+    on(v, 'seeking', () => { if (a && !this.audioOnly) a.currentTime = v.currentTime; });
+    on(v, 'progress', () => this.renderBuffer());
+    on(v, 'timeupdate', () => { if (!this.audioOnly) this.tick(); });
+    const ended = () => {
+      if (this.endedFired) return;
+      if (this.loopAll) { this.seek(0); this.play(); return; }
+      this.endedFired = true;
+      a?.pause();
+      if (this.watchAcc > 1) { this.opts.onTick?.(Math.round(this.watchAcc)); this.watchAcc = 0; }
+      this.opts.onProgress?.(this.duration, this.duration);
+      this.renderState();
+      if (this.sleep === -1) { this.sleep = 0; this.renderBadges(); this.opts.onToast?.('Boa noite! Parei no fim do vídeo.'); return; }
+      this.opts.onEnded?.();
+    };
+    on(v, 'ended', ended);
+    on(v, 'seeking', () => { this.endedFired = false; });
+    on(v, 'error', () => { if (!this.audioOnly) this.recover(); });
+    if (a) {
+      // O vídeo manda; se o áudio engasgar, ele se recupera sozinho (pausar o vídeo aqui criava um ciclo de pausa/play).
+      on(a, 'ended', () => { if (v.paused || this.audioOnly) ended(); });
+      on(a, 'play', () => this.renderState());
+      on(a, 'pause', () => this.renderState());
+      on(a, 'playing', () => this.root.classList.remove('loading'));
+      // Com a imagem parada (segundo plano ou modo só áudio), o tempo segue o som.
+      on(a, 'timeupdate', () => { if (this.audioOnly || (v.paused && !a.paused)) this.tick(); });
+      on(a, 'error', () => this.recover());
+    }
+    this.onVisible = () => {
+      if (this.audioOnly || document.hidden || !a || a.paused || this.userPaused || !v.paused) return;
+      v.currentTime = a.currentTime;
+      v.play().catch(() => {});
+    };
+    document.addEventListener('visibilitychange', this.onVisible);
+    addEventListener('focus', this.onVisible);
+    this.root.addEventListener('pointerenter', this.onVisible);
+
+    // Controles
+    on(this.root, 'click', (e) => {
+      const b = e.target.closest('[data-a]');
+      if (b) {
+        e.stopPropagation();
+        const act = b.dataset.a;
+        const val = b.dataset.v;
+        if (act === 'toggle') this.toggle();
+        if (act === 'next') this.opts.onNext?.();
+        if (act === 'golive') this.goLive();
+        if (act === 'mute') { this.out.muted = !this.out.muted; this.renderVolume(); }
+        if (act === 'fs') this.fullscreen();
+        if (act === 'menu') this.toggleMenu();
+        if (act === 'panel') this.renderMenu(val, val === 'main' ? -1 : 1);
+        if (act === 'speed') { this.setRate(Number(val)); this.renderMenu('main', -1); }
+        if (act === 'quality') { this.setQuality(Number(val)); this.renderMenu('main', -1); }
+        if (act === 'audio') { this.setAudio(val); this.renderMenu('main', -1); }
+        if (act === 'loop') { this.setLoop(val); this.renderMenu('main', -1); }
+        if (act === 'sleep') { this.setSleep(Number(val)); this.renderMenu('main', -1); }
+        if (act === 'audio-only') { this.setAudioOnly(!this.audioOnly); this.renderMenu('main', 0); }
+        if (act === 'skip') { this.skipSegments = !this.skipSegments; this.opts.onSkipToggle?.(this.skipSegments); this.renderMenu('main', 0); }
+        if (act === 'shot') { this.toggleMenu(false); this.screenshot(); }
+        return;
+      }
+      if (e.target.closest('.p-bar, .p-menu')) return;
+      if (!this.menu.hidden) return this.toggleMenu(false);
+      // No toque, o primeiro toque só mostra os controles.
+      if (this.lastPointer === 'touch' && this.root.classList.contains('idle')) return this.wake();
+      this.toggle();
+    });
+    on(this.root, 'dblclick', (e) => { if (!e.target.closest('.p-bar')) this.fullscreen(); });
+    on(this.root, 'pointerdown', (e) => { this.lastPointer = e.pointerType; });
+    on(this.root, 'pointermove', () => this.wake());
+    on(this.root, 'pointerleave', () => { if (this.playing) this.root.classList.add('idle'); });
+    on(this.volInput, 'input', () => { this.out.volume = Number(this.volInput.value); this.out.muted = this.out.volume === 0; this.renderVolume(); });
+
+    // Barra de progresso: arrastar, clicar e prévia do tempo (mostra o nome do trecho ou do seu momento).
+    const at = (e) => {
+      const r = this.bar.getBoundingClientRect();
+      return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    };
+    on(this.bar, 'pointermove', (e) => {
+      const p = at(e);
+      const t = p * this.duration;
+      const seg = this.segments.find((s) => t >= s.start && t <= s.end);
+      const mk = this.marks.find((m) => Math.abs(m.t - t) < this.duration / 120);
+      this.tip.textContent = `${time(t)}${mk?.note ? ` · ${mk.note}` : seg ? ` · ${SEG_NAMES[seg.category] || ''}` : ''}`;
+      this.tip.style.left = `${p * 100}%`;
+      if (this.dragging) this.paint(p);
+    });
+    on(this.bar, 'pointerdown', (e) => {
+      this.dragging = true;
+      this.bar.setPointerCapture(e.pointerId);
+      this.bar.classList.add('drag');
+      this.paint(at(e));
+    });
+    const end = (e) => {
+      if (!this.dragging) return;
+      this.dragging = false;
+      this.bar.classList.remove('drag');
+      this.seek(at(e) * this.duration);
+    };
+    on(this.bar, 'pointerup', end);
+    on(this.bar, 'pointercancel', () => { this.dragging = false; this.bar.classList.remove('drag'); });
+    on(this.bar, 'keydown', (e) => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); this.seek(this.now - 5); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); this.seek(this.now + 5); }
+    });
+
+    this.onKey = (e) => {
+      if (e.target.closest('input, textarea, [contenteditable]') || e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      const stepRate = (dir) => {
+        const i = SPEEDS.indexOf(this.v.playbackRate);
+        const r = SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, (i < 0 ? 3 : i) + dir))];
+        this.setRate(r);
+        this.bezel('gauge', `${String(r).replace('.', ',')}x`);
+      };
+      const act = {
+        ' ': () => this.toggle(), k: () => this.toggle(),
+        j: () => { this.seek(this.now - 10); this.bezel('back', '10 s'); },
+        l: () => { this.seek(this.now + 10); this.bezel('fwd', '10 s'); },
+        arrowleft: () => { this.seek(this.now - 5); this.bezel('back', '5 s'); },
+        arrowright: () => { this.seek(this.now + 5); this.bezel('fwd', '5 s'); },
+        arrowup: () => { this.nudgeVolume(0.05); this.bezel('volume', `${Math.round(this.out.volume * 100)}%`); },
+        arrowdown: () => { this.nudgeVolume(-0.05); this.bezel(this.out.volume ? 'volume' : 'mute', `${Math.round(this.out.volume * 100)}%`); },
+        m: () => { this.out.muted = !this.out.muted; this.renderVolume(); this.bezel(this.out.muted ? 'mute' : 'volume'); },
+        f: () => this.fullscreen(),
+        n: () => this.opts.onNext?.(),
+        s: () => this.screenshot(),
+        '>': () => stepRate(1), '<': () => stepRate(-1),
+      }[k];
+      if (!act) return;
+      if (k === ' ' && e.target.closest('button, a')) return;
+      e.preventDefault();
+      act();
+      this.wake();
+    };
+    document.addEventListener('keydown', this.onKey);
+    // Fecha o menu ao clicar fora do player ou apertar Esc.
+    this.onDocClick = (e) => {
+      if (!this.menu.hidden && e.target.isConnected && !this.root.contains(e.target)) this.toggleMenu(false);
+    };
+    this.onEsc = (e) => {
+      if (e.key === 'Escape' && !this.menu.hidden) { e.stopPropagation(); this.toggleMenu(false); this.root.querySelector('[data-a="menu"]').focus(); }
+    };
+    document.addEventListener('click', this.onDocClick);
+    this.root.addEventListener('keydown', this.onEsc);
+    this.onFs = () => {
+      const fs = document.fullscreenElement === this.root;
+      this.root.querySelector('[data-a="fs"]').innerHTML = icon(fs ? 'minimize' : 'maximize', 20);
+    };
+    document.addEventListener('fullscreenchange', this.onFs);
+  }
+
+  // Mantém o áudio colado no vídeo; corrige quando a diferença passa de 0,3 s.
+  syncAudio(forcePlay) {
+    const { v, a } = this;
+    if (!a || this.audioOnly || v.paused || document.hidden) return;
+    // Corrige no máximo a cada 1,5 s: cada correção faz o áudio recarregar um instante.
+    const now = performance.now();
+    if (Math.abs(a.currentTime - v.currentTime) > DRIFT && now - (this.lastFix || 0) > 1500) {
+      this.lastFix = now;
+      a.currentTime = v.currentTime;
+    }
+    if (forcePlay && a.paused) a.play().catch(() => {});
+  }
+
+  async recover() {
+    if (this.retried || this.destroyed) return;
+    this.retried = true;
+    const t = this.now;
+    const playing = this.playing;
+    try { await fetch(`/api/video?id=${this.info.id}&fresh=1`); } catch {}
+    // Live: recomeça do momento atual (e pode tentar de novo daqui a 30 s, se o sinal cair outra vez).
+    if (this.hls) { setTimeout(() => { this.retried = false; }, 30000); return this.setSrc(this.quality.src); }
+    const bust = `?r=${Date.now()}`;
+    if (!this.audioOnly) this.v.src = this.quality.src + bust;
+    if (this.a) this.a.src = this.audioSrc + bust;
+    (this.audioOnly ? this.a : this.v).addEventListener('loadedmetadata', () => { this.seek(t); if (playing) this.play(); }, { once: true });
+  }
+
+  setQuality(h) {
+    if (this.hls) { this.hls.currentLevel = h === -1 ? -1 : this.hls.levels.findIndex((l) => l.height === h); return; }
+    const q = this.info.qualities.find((x) => x.height === h);
+    if (!q || q === this.quality) return;
+    save('quality2k', h);
+    this.quality = q;
+    if (this.audioOnly) return; // aplica quando o vídeo voltar
+    const t = this.now;
+    const playing = this.playing;
+    const rate = this.v.playbackRate;
+    this.v.src = q.src;
+    this.v.addEventListener('loadedmetadata', () => {
+      this.v.playbackRate = rate;
+      this.seek(t);
+      if (playing) this.play();
+    }, { once: true });
+  }
+
+  nudgeVolume(d) {
+    this.out.volume = Math.min(1, Math.max(0, this.out.volume + d));
+    this.out.muted = false;
+    this.renderVolume();
+  }
+
+  fullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else this.root.requestFullscreen?.().catch(() => {});
+  }
+
+  toggleMenu(force) {
+    const open = force ?? this.menu.hidden;
+    if (open) this.renderMenu('main', 0);
+    this.menu.hidden = !open;
+    this.root.classList.toggle('menu-open', open);
+    this.root.querySelector('[data-a="menu"]').setAttribute('aria-expanded', String(open));
+  }
+
+  wake() {
+    this.root.classList.remove('idle');
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      if (this.playing && this.menu.hidden && !this.dragging) this.root.classList.add('idle');
+    }, 2600);
+  }
+
+  paint(p) {
+    this.played.style.width = `${p * 100}%`;
+    this.knob.style.left = `${p * 100}%`;
+  }
+
+  renderTime() {
+    if (this.dragging) return;
+    const d = this.duration;
+    const t = this.now;
+    if (this.live) {
+      // Ponto vermelho = no momento atual; cinza = assistindo atrasado (clique volta para o atual).
+      const edge = this.v.seekable.length ? this.v.seekable.end(this.v.seekable.length - 1) : t;
+      this.root.querySelector('.p-live').classList.toggle('behind', edge - t > 20);
+      return;
+    }
+    this.paint(d ? t / d : 0);
+    this.timeEl.textContent = `${time(t)} / ${time(d)}`;
+    this.bar.setAttribute('aria-valuemax', String(Math.round(d)));
+    this.bar.setAttribute('aria-valuenow', String(Math.round(t)));
+    this.bar.setAttribute('aria-valuetext', `${time(t)} de ${time(d)}`);
+  }
+
+  renderBuffer() {
+    const { v } = this;
+    const d = v.duration;
+    if (!d) return;
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (v.buffered.start(i) <= v.currentTime + 0.5 && v.buffered.end(i) >= v.currentTime) {
+        this.buf.style.width = `${(v.buffered.end(i) / d) * 100}%`;
+        return;
+      }
+    }
+  }
+
+  renderState() {
+    const playing = this.playing && !this.v.ended;
+    this.root.classList.toggle('playing', playing);
+    this.root.querySelectorAll('.p-row [data-a="toggle"]').forEach((b) => {
+      b.innerHTML = icon(playing ? 'pause' : 'play', 22);
+      b.setAttribute('aria-label', playing ? 'Pausar' : 'Reproduzir');
+    });
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+  }
+
+  renderVolume() {
+    const o = this.out;
+    const muted = o.muted || o.volume === 0;
+    this.volInput.value = String(muted ? 0 : o.volume);
+    this.volInput.style.setProperty('--v', `${(muted ? 0 : o.volume) * 100}%`);
+    const b = this.root.querySelector('[data-a="mute"]');
+    b.innerHTML = icon(muted ? 'mute' : 'volume', 21);
+    b.setAttribute('aria-label', muted ? 'Ativar som' : 'Silenciar');
+    save('volume', { v: o.volume || 1, m: muted });
+  }
+
+  // Menu de configurações no estilo do YouTube: lista principal e submenus que deslizam.
+  renderMenu(panel = 'main', dir = 0) {
+    const speedLabel = (s) => (s === 1 ? 'Normal' : `${String(s).replace('.', ',')}x`);
+    const qLabel = (h) => `${h}p${h >= 2160 ? '<b class="hd">4K</b>' : h >= 1440 ? '<b class="hd">2K</b>' : h >= 1080 ? '<b class="hd">HD</b>' : ''}`;
+    const audios = this.info.audios || [];
+    const curAudio = audios.find((x) => x.src === this.audioSrc);
+    const row = (id, ic, label, value) => `<button class="pm-row" role="menuitem" data-a="panel" data-v="${id}">
+      <span class="pm-ic">${icon(ic, 22)}</span><span class="pm-label">${label}</span><span class="pm-val">${value}</span>${icon('chevron', 18)}</button>`;
+    const sw = (act, ic, label, on, hint = '') => `<button class="pm-row pm-switch" role="menuitemcheckbox" aria-checked="${on}" data-a="${act}">
+      <span class="pm-ic">${icon(ic, 22)}</span><span class="pm-label">${label}${hint ? `<small>${hint}</small>` : ''}</span><span class="pm-toggle ${on ? 'on' : ''}"></span></button>`;
+    const action = (act, ic, label, hint) => `<button class="pm-row" role="menuitem" data-a="${act}">
+      <span class="pm-ic">${icon(ic, 22)}</span><span class="pm-label">${label}</span><span class="pm-val">${hint}</span></button>`;
+    const item = (act, v, label, on) => `<button class="pm-item ${on ? 'on' : ''}" role="menuitemradio" aria-checked="${on}" data-a="${act}" data-v="${v}">
+      <span class="pm-check">${on ? icon('check', 20) : ''}</span><span>${label}</span></button>`;
+    const head = (title) => `<button class="pm-head" data-a="panel" data-v="main">${icon('chevronLeft', 22)}<span>${title}</span></button>`;
+    const loopLabel = this.loopAll ? 'Vídeo inteiro' : this.loopB != null ? `${time(this.loopA)}–${time(this.loopB)}` : 'Desligado';
+    const sleepLabel = this.sleep > 0 ? `${Math.max(1, Math.ceil((this.sleepAt - Date.now()) / 60000))} min` : this.sleep === -1 ? 'Fim do vídeo' : 'Desligado';
+
+    // Live: as qualidades vêm da própria lista HLS, com "Automática" (ajusta à internet) por padrão.
+    const hls = this.hls;
+    const hlsHeights = hls ? [...new Set(hls.levels.map((l) => l.height).filter(Boolean))].sort((a, b) => b - a) : [];
+    const hlsNow = hls?.levels[hls.currentLevel]?.height;
+    const qValue = this.audioOnly ? 'Só áudio' : hls ? (hls.autoLevelEnabled ? `Automática${hlsNow ? ` (${hlsNow}p)` : ''}` : qLabel(hlsNow || 0)) : qLabel(this.quality.height);
+
+    let html;
+    if (panel === 'speed') html = head('Velocidade (lembrada por canal)') + SPEEDS.map((s) => item('speed', s, speedLabel(s), s === this.v.playbackRate)).join('');
+    else if (panel === 'quality' && hls) html = head('Qualidade') + item('quality', -1, 'Automática', hls.autoLevelEnabled) + hlsHeights.map((h) => item('quality', h, qLabel(h), !hls.autoLevelEnabled && h === hlsNow)).join('');
+    else if (panel === 'quality') html = head('Qualidade') + this.info.qualities.map((q) => item('quality', q.height, qLabel(q.height), q === this.quality)).join('');
+    else if (panel === 'audio') html = head('Faixa de áudio') + audios.map((x) => item('audio', x.src, x.label, x === curAudio)).join('');
+    else if (panel === 'loop') {
+      html = head('Repetir')
+        + item('loop', 'a', `Marcar início aqui (${time(this.now)})`, this.loopA != null && this.loopB == null)
+        + item('loop', 'b', `Marcar fim aqui e repetir (${time(this.now)})`, this.loopB != null)
+        + item('loop', 'all', 'Repetir o vídeo inteiro', this.loopAll)
+        + item('loop', 'off', 'Desligar repetição', !this.loopAll && this.loopB == null && this.loopA == null);
+    } else if (panel === 'sleep') {
+      html = head('Timer para dormir') + SLEEP.map((m) => item('sleep', m, m === 0 ? 'Desligado' : m === -1 ? 'No fim deste vídeo' : `${m} minutos`, this.sleep === m)).join('');
+    } else {
+      html = row('speed', 'gauge', 'Velocidade', speedLabel(this.v.playbackRate))
+        + row('quality', 'quality', 'Qualidade', qValue)
+        + (audios.length > 1 ? row('audio', 'headphones', 'Faixa de áudio', curAudio?.label || '') : '')
+        + row('loop', 'repeat', 'Repetir', loopLabel)
+        + row('sleep', 'moon', 'Timer para dormir', sleepLabel)
+        + (this.a ? sw('audio-only', 'headphones', 'Modo só áudio', !!this.audioOnly, 'gasta bem menos internet') : '')
+        + (this.segments.length ? sw('skip', 'skipForward', 'Pular patrocínios', this.skipSegments, `${this.segments.length} trecho(s) neste vídeo`) : '')
+        + action('shot', 'camera', 'Capturar quadro', 'tecla S');
+    }
+
+    const m = this.menu;
+    const from = m.hidden ? 0 : m.offsetHeight;
+    const width = m.hidden ? 0 : m.offsetWidth;
+    m.innerHTML = `<div class="pm-panel ${dir > 0 ? 'from-right' : dir < 0 ? 'from-left' : ''}">${html}</div>`;
+    if (from && dir && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const to = m.offsetHeight;
+      const toW = m.offsetWidth;
+      m.animate([{ height: `${from}px`, width: `${width}px` }, { height: `${to}px`, width: `${toW}px` }], { duration: 260, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+    }
+    if (dir) m.querySelector('.pm-panel button')?.focus({ preventScroll: true });
+  }
+
+  mediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: this.info.title,
+      artist: this.info.channel,
+      artwork: [{ src: `https://i.ytimg.com/vi/${this.info.id}/hqdefault.jpg`, sizes: '480x360', type: 'image/jpeg' }],
+    });
+    const ms = navigator.mediaSession;
+    ms.setActionHandler('play', () => this.play());
+    ms.setActionHandler('pause', () => this.pause());
+    ms.setActionHandler('seekbackward', () => this.seek(this.now - 10));
+    ms.setActionHandler('seekforward', () => this.seek(this.now + 10));
+    ms.setActionHandler('nexttrack', this.opts.onNext ? () => this.opts.onNext() : null);
+  }
+
+  destroy() {
+    this.destroyed = true;
+    if (this.watchAcc > 1) this.opts.onTick?.(Math.round(this.watchAcc));
+    clearTimeout(this.idleTimer);
+    clearInterval(this.sleepTimer);
+    this.hls?.destroy();
+    document.removeEventListener('keydown', this.onKey);
+    document.removeEventListener('fullscreenchange', this.onFs);
+    document.removeEventListener('visibilitychange', this.onVisible);
+    removeEventListener('focus', this.onVisible);
+    document.removeEventListener('click', this.onDocClick);
+    for (const el of [this.v, this.a]) {
+      if (!el) continue;
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+    }
+  }
+}

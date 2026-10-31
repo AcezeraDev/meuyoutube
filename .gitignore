@@ -1,0 +1,12 @@
+# Login do YouTube e dados pessoais: nunca sobem para o GitHub
+cookies.txt
+cookies.txt.teste
+config.json
+login-profile/
+
+# Cache gerado pelo servidor
+avatars.json
+
+# Dependências e ferramentas locais
+node_modules/
+.claude/settings.local.json

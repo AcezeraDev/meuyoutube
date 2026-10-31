@@ -1,0 +1,1952 @@
+import { icon } from './icons.js';
+import { Player, SEG_NAMES } from './player.js';
+import * as lib from './library.js';
+import { mountComments, mountChat } from './social.js';
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const app = $('#app');
+const body = document.body;
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------- utilidades ----------
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const nf = new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 });
+const big = (n, word) => { const s = nf.format(n); return /mi|bi/.test(s) ? `${s} de ${word}` : `${s} ${word}`; };
+const views = (n) => (n ? big(n, 'visualizações') : '');
+const subsCount = (n) => (n ? big(n, 'inscritos') : '');
+const dur = (s) => {
+  s = Math.floor(s || 0);
+  if (!s) return '';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
+};
+const rtf = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
+const ago = (d) => {
+  if (!d || d.length !== 8) return '';
+  const days = (Date.now() - new Date(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8))) / 864e5;
+  if (days < 1) return 'hoje';
+  if (days < 30) return rtf.format(-Math.round(days), 'day');
+  if (days < 365) return rtf.format(-Math.round(days / 30), 'month');
+  return rtf.format(-Math.round(days / 365), 'year');
+};
+const thumbUrl = (v) => v.thumb || `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`;
+const hue = (s) => [...(s || '?')].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+// Sem foto conhecida: inicial colorida com data-cid; hydrateAvatars() troca pela foto real quando ela chega.
+const avatar = (name, url, cls = '', cid = '') => url
+  ? `<img class="avatar ${cls}" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+  : `<span class="avatar ${cls}" ${cid ? `data-cid="${cid}"` : ''} style="--h:${hue(name)}" aria-hidden="true">${esc((name || '?').trim().charAt(0).toUpperCase() || '?')}</span>`;
+
+// Logo do MeuTube (cada cópia com id próprio de degradê).
+let logoN = 0;
+const logoMark = () => {
+  const id = `lg${++logoN}`;
+  return `<svg class="logo-mark" width="36" height="28" viewBox="0 0 36 28" aria-hidden="true">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2f8cff"/><stop offset=".55" stop-color="#38c6ff"/><stop offset="1" stop-color="#8ef0ff"/></linearGradient></defs>
+    <rect x="1" y="2" width="32" height="25" rx="9" fill="url(#${id})"/>
+    <path class="logo-play" d="M13.6 9.6v9.8c0 .95 1.05 1.5 1.8 1l7.5-4.9c.72-.47.72-1.53 0-2l-7.5-4.9c-.75-.5-1.8.05-1.8 1z" fill="#fff"/>
+    <path class="logo-spark" d="M31 .6l1.05 2.85 2.85 1.05-2.85 1.05L31 8.4l-1.05-2.85L27.1 4.5l2.85-1.05z" fill="#fff" stroke="#070b12" stroke-width=".9" stroke-linejoin="round"/>
+  </svg>`;
+};
+const logo = () => `${logoMark()}<span class="wordmark">meu<b>tube</b></span>`;
+const vf = (on) => (on ? `<span class="vf" title="Verificado">${icon('verified', 14)}</span>` : '');
+const dot = (...parts) => parts.filter(Boolean).join('<span class="sep">•</span>');
+
+// Barra vermelha de carregamento no topo (como no YouTube).
+let pending = 0;
+const bar = $('#loadbar');
+function loading(delta) {
+  pending = Math.max(0, pending + delta);
+  if (pending > 0 && !bar.classList.contains('run')) {
+    bar.classList.remove('done');
+    void bar.offsetWidth;
+    bar.classList.add('run');
+  } else if (pending === 0 && bar.classList.contains('run')) {
+    bar.classList.replace('run', 'done');
+  }
+}
+
+// Cache no navegador: voltar para uma tela ou abrir de novo um vídeo é instantâneo (3 minutos).
+const apiCache = new Map();
+const CACHEABLE = /^\/api\/(search|channel|feed|video|segments|votes)\b/;
+async function api(path, { fresh = false } = {}) {
+  const hit = apiCache.get(path);
+  if (!fresh && hit && Date.now() - hit.t < 3 * 60e3) return hit.data;
+  loading(1);
+  try {
+    const r = await fetch(path);
+    const j = await r.json().catch(() => ({ error: 'O servidor respondeu algo inesperado.' }));
+    if (!r.ok) throw Object.assign(new Error(j.error || 'Algo deu errado.'), { code: j.code || '' });
+    if (CACHEABLE.test(path)) {
+      apiCache.set(path, { t: Date.now(), data: j });
+      if (apiCache.size > 300) apiCache.delete(apiCache.keys().next().value);
+    }
+    return j;
+  } finally {
+    loading(-1);
+  }
+}
+
+async function send(path, data, method = 'POST') {
+  loading(1);
+  try {
+    const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: data ? JSON.stringify(data) : undefined });
+    const j = await r.json().catch(() => ({ error: 'O servidor respondeu algo inesperado.' }));
+    if (!r.ok) throw new Error(j.error || 'Algo deu errado.');
+    return j;
+  } finally {
+    loading(-1);
+  }
+}
+
+// Conta do YouTube conectada (o login vem do navegador escolhido; a senha nunca passa pelo site).
+let account = { connected: false, browsers: [] };
+let accountChannels = [];
+async function loadAccount() {
+  try { account = await api('/api/account'); } catch {}
+  body.classList.toggle('has-account', account.connected);
+  accountChannels = [];
+  renderGuide();
+  if (account.connected) {
+    api('/api/feed?k=channels').then((c) => { accountChannels = c; renderGuide(); }).catch(() => {});
+  }
+  renderMe();
+}
+// Botão de conta no topo: sua foto do YouTube quando conectado; o ícone padrão quando não.
+const ME_ICON = $('.me svg')?.outerHTML || '';
+async function renderMe() {
+  const btn = $('.me');
+  if (!btn) return;
+  const me = account.connected ? await fetch('/api/account/me').then((r) => r.json()).catch(() => ({})) : {};
+  const label = me.name ? `Conta do YouTube: ${me.name}${me.handle ? ` (${me.handle})` : ''}` : 'Conta do YouTube';
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+  btn.classList.toggle('has-photo', Boolean(me.photo));
+  btn.querySelector('svg, .me-photo')?.remove();
+  btn.insertAdjacentHTML('afterbegin', me.photo
+    ? `<img class="me-photo" src="${esc(me.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.closest('.me').classList.remove('has-photo');this.outerHTML=${esc(JSON.stringify(ME_ICON))}">`
+    : ME_ICON);
+}
+const allChannels = () => {
+  const local = subs();
+  const ids = new Set(local.map((c) => c.id));
+  return [...local, ...accountChannels.filter((c) => !ids.has(c.id))];
+};
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+// ---------- dados locais (só neste navegador) ----------
+const known = new Map();
+const remember = (list) => list.forEach((v) => known.set(v.id, { ...known.get(v.id), ...v }));
+const slim = (v) => ({ id: v.id, title: v.title, channel: v.channel, channelId: v.channelId, avatar: v.avatar, verified: v.verified, duration: v.duration, views: v.views, thumb: v.thumb });
+
+const later = () => store.get('later', []);
+const subs = () => store.get('subs', []);
+const progress = () => store.get('progress', {});
+const isLater = (id) => later().some((x) => x.id === id);
+const isSub = (cid) => subs().some((x) => x.id === cid);
+
+function toggleLater(id) {
+  const list = later();
+  const on = !list.some((x) => x.id === id);
+  store.set('later', on ? [slim(known.get(id) || { id }), ...list] : list.filter((x) => x.id !== id));
+  return on;
+}
+function toggleSub(cid, name, pic) {
+  const list = subs();
+  const on = !list.some((x) => x.id === cid);
+  store.set('subs', on ? [...list, { id: cid, name, avatar: pic || '' }] : list.filter((x) => x.id !== cid));
+  renderGuide();
+  return on;
+}
+
+// ---------- componentes ----------
+function thumbBlock(v) {
+  const p = progress()[v.id];
+  const pct = p && p.d ? Math.min(100, (p.t / p.d) * 100) : 0;
+  const saved = isLater(v.id);
+  return `<div class="thumb-wrap">
+    <a class="thumb" href="#/watch/${v.id}" data-watch tabindex="-1" aria-hidden="true">
+      <img loading="lazy" decoding="async" src="${esc(thumbUrl(v))}" alt="" onerror="this.onerror=null;this.src='https://i.ytimg.com/vi/${v.id}/mqdefault.jpg'">
+      ${v.live ? `<span class="dur live">${icon('live', 13)}AO VIVO</span>` : v.duration ? `<span class="dur">${dur(v.duration)}</span>` : ''}
+      ${pct ? `<span class="prog"><i style="width:${pct}%"></i></span>` : ''}
+    </a>
+    <button class="later ${saved ? 'on' : ''}" data-later="${v.id}" aria-pressed="${saved}" aria-label="Assistir mais tarde" data-tip="${saved ? 'Salvo' : 'Assistir mais tarde'}">${icon(saved ? 'check' : 'clock', 18)}</button>
+  </div>`;
+}
+const chanLink = (v, cls = 'meta') => v.channelId
+  ? `<a class="${cls} ch" href="#/channel/${v.channelId}">${esc(v.channel)}${vf(v.verified)}</a>`
+  : `<span class="${cls}">${esc(v.channel)}${vf(v.verified)}</span>`;
+const chanAvatar = (v, cls = '') => v.channelId
+  ? `<a class="av-link" href="#/channel/${v.channelId}" tabindex="-1" aria-hidden="true">${avatar(v.channel, v.avatar, cls, v.channelId)}</a>`
+  : avatar(v.channel, v.avatar, cls);
+const stagger = (i) => `style="--i:${Math.min(i, 16)}"`;
+// Botão "⋯" de cada vídeo: salvar em playlist, assistir mais tarde, esconder canal, copiar link.
+const moreBtn = (v) => `<button class="more rpl" data-more="${v.id}" aria-label="Mais ações" aria-haspopup="menu">${icon('more', 20)}</button>`;
+
+function gridCard(v, i = 0) {
+  return `<article class="card" data-vid="${v.id}" ${stagger(i)}>
+    ${thumbBlock(v)}
+    <div class="card-body">
+      ${chanAvatar(v)}
+      <div class="card-text">
+        <a class="title" href="#/watch/${v.id}" data-watch>${esc(v.title)}</a>
+        ${chanLink(v)}
+        <span class="meta">${dot(views(v.views), ago(v.date))}</span>
+      </div>
+      ${moreBtn(v)}
+    </div>
+  </article>`;
+}
+function rowCard(v, i = 0) {
+  return `<article class="row-card" data-vid="${v.id}" ${stagger(i)}>
+    ${thumbBlock(v)}
+    ${moreBtn(v)}
+    <div class="row-text">
+      <a class="title lg" href="#/watch/${v.id}" data-watch>${esc(v.title)}</a>
+      <span class="meta sm">${dot(views(v.views), ago(v.date))}</span>
+      ${v.channel ? `<div class="row-ch">${chanAvatar(v, 'xs')}${chanLink(v, 'meta sm')}</div>` : ''}
+      ${v.description ? `<p class="snippet">${esc(v.description)}</p>` : ''}
+    </div>
+  </article>`;
+}
+function compactCard(v, i = 0) {
+  return `<article class="compact" data-vid="${v.id}" ${stagger(i)}>
+    ${thumbBlock(v)}
+    ${moreBtn(v)}
+    <div class="compact-text">
+      <a class="title sm" href="#/watch/${v.id}" data-watch>${esc(v.title)}</a>
+      ${chanLink(v, 'meta sm')}
+      <span class="meta sm">${views(v.views)}</span>
+    </div>
+  </article>`;
+}
+function subButton(c, extra = '') {
+  const on = isSub(c.id);
+  return `<button class="sub-btn rpl ${on ? 'on' : ''} ${extra}" data-sub="${c.id}" data-name="${esc(c.name)}" data-avatar="${esc(c.avatar || '')}" aria-pressed="${on}">
+    ${on ? `<span class="bell">${icon('bell', 18)}</span>Inscrito` : 'Inscrever-se'}</button>`;
+}
+function channelRow(c, i = 0) {
+  return `<article class="ch-row" ${stagger(i)}>
+    <a class="ch-row-av" href="#/channel/${c.id}" tabindex="-1" aria-hidden="true">${avatar(c.name, c.avatar, 'xl', c.id)}</a>
+    <div class="ch-row-text">
+      <a class="ch-row-name" href="#/channel/${c.id}">${esc(c.name)}${vf(c.verified)}</a>
+      <span class="meta sm">${dot(esc(c.handle), subsCount(c.followers))}</span>
+      ${c.description ? `<p class="snippet">${esc(c.description)}</p>` : ''}
+    </div>
+    ${subButton(c)}
+  </article>`;
+}
+
+// Toda lista passa pelo filtro de canais e palavras bloqueados (Ajustes).
+const list = (items, render, cls) => {
+  items = items.filter((v) => !lib.isBlocked(v));
+  remember(items);
+  return `<div class="${cls}">${items.map(render).join('')}</div>`;
+};
+const grid = (items) => list(items, gridCard, 'grid');
+const rows = (items) => list(items, rowCard, 'rows');
+const compacts = (items) => list(items, compactCard, 'compacts');
+
+const skGrid = (n = 12) => `<div class="grid" aria-busy="true">${'<div class="card sk"><div class="thumb-wrap"><div class="thumb"></div></div><div class="card-body"><span class="avatar"></span><div class="card-text"><i></i><i></i></div></div></div>'.repeat(n)}</div>`;
+const skRows = (n = 6) => `<div class="rows" aria-busy="true">${'<div class="row-card sk"><div class="thumb-wrap"><div class="thumb"></div></div><div class="row-text"><i></i><i></i><i></i></div></div>'.repeat(n)}</div>`;
+const skCompact = (n = 8) => `<div class="compacts" aria-busy="true">${'<div class="compact sk"><div class="thumb-wrap"><div class="thumb"></div></div><div class="compact-text"><i></i><i></i></div></div>'.repeat(n)}</div>`;
+// Carregamento infinito: um "sentinela" no fim da lista busca a próxima página quando chega perto da tela.
+const RENDERERS = { grid: gridCard, rows: rowCard, compacts: compactCard };
+function infinite(list, load, t, { page = 1, onItems } = {}) {
+  if (!list || !('IntersectionObserver' in window)) return;
+  const render = RENDERERS[list.className.split(' ')[0]] || gridCard;
+  const sk = list.classList.contains('grid') ? skGrid(4) : list.classList.contains('rows') ? skRows(2) : skCompact(3);
+  const sentinel = document.createElement('div');
+  sentinel.className = 'sentinel';
+  sentinel.innerHTML = sk;
+  list.after(sentinel);
+  const seen = new Set($$('[data-vid]', list).map((e) => e.dataset.vid));
+  let busy = false;
+  let fails = 0;
+  const obs = new IntersectionObserver(async ([e]) => {
+    if (!e.isIntersecting || busy) return;
+    if (t !== token || !sentinel.isConnected) return obs.disconnect();
+    busy = true;
+    try {
+      const r = await load(page);
+      if (t !== token) return obs.disconnect();
+      fails = 0;
+      page++;
+      const fresh = r.items.filter((v) => !seen.has(v.id) && !lib.isBlocked(v));
+      fresh.forEach((v) => seen.add(v.id));
+      onItems?.(fresh);
+      remember(fresh);
+      list.insertAdjacentHTML('beforeend', fresh.map((v, i) => render(v, i)).join(''));
+      if (!r.more || !r.items.length) {
+        obs.disconnect();
+        sentinel.innerHTML = `<p class="list-end">${icon('check', 16)} Você chegou ao fim</p>`;
+      }
+    } catch (err) {
+      obs.disconnect();
+      if (err.code === 'bot') {
+        // Limite do YouTube no meio da rolagem: mantém o "carregando" e tenta a mesma página de novo sozinho.
+        fails = Math.min(fails + 1, 5);
+        setTimeout(() => { if (t === token && sentinel.isConnected) obs.observe(sentinel); }, 5000 * fails);
+      } else {
+        sentinel.innerHTML = `${failure(err)}<button class="pill rpl" data-retry>Tentar de novo</button>`;
+        sentinel.querySelector('[data-retry]').addEventListener('click', () => { sentinel.innerHTML = sk; obs.observe(sentinel); });
+      }
+    } finally {
+      busy = false;
+    }
+    // Se o sentinela continua visível (tela grande), dispara de novo.
+    if (sentinel.isConnected && sentinel.querySelector('.sk')) { obs.unobserve(sentinel); obs.observe(sentinel); }
+  }, { rootMargin: '0px 0px 1200px 0px' });
+  obs.observe(sentinel);
+}
+
+const empty = (ic, title, text = '') => `<div class="empty">${icon(ic, 72)}<h3>${title}</h3>${text ? `<p>${text}</p>` : ''}</div>`;
+// Quando o YouTube segura os pedidos, o servidor já tentou várias identidades e clientes. Aqui não aparece
+// aviso de bloqueio: a tela continua "carregando" e tenta de novo sozinha, com esperas crescentes, até conseguir.
+const RETRY_STEPS = [4, 8, 15, 25, 40, 60]; // segundos; depois fica tentando a cada 60 s
+const retryCount = new Map(); // tela (hash) -> tentativas seguidas
+const failure = (e) => e.code === 'bot'
+  ? `<div class="soft-wait" role="status" data-blocked>
+      <span class="sw-spin"></span>
+      <div><b>Carregando…</b><span class="meta sm">O YouTube está respondendo devagar; continuo tentando sozinho.</span></div>
+      <button class="pill rpl" data-retry-now>Tentar agora</button>
+    </div>`
+  : `<div class="alert" role="alert">${icon('alert', 22)}<div><strong>Não deu certo.</strong> ${esc(e.message)}</div></div>`;
+
+// ---------- menu lateral ----------
+const NAV = [
+  { id: 'home', href: '#/', label: 'Início', ic: 'home' },
+  { id: 'subs', href: '#/subs', label: 'Inscrições', ic: 'subs' },
+];
+const YOU = [
+  { id: 'history', href: '#/history', label: 'Histórico', ic: 'history' },
+  { id: 'later', href: '#/later', label: 'Assistir mais tarde', ic: 'clock' },
+  { id: 'playlists', href: '#/playlists', label: 'Playlists', ic: 'playlist' },
+];
+const EXTRA = [
+  { id: 'stats', href: '#/stats', label: 'Suas estatísticas', ic: 'chart' },
+  { id: 'settings', href: '#/settings', label: 'Ajustes', ic: 'sliders' },
+];
+const navItem = (n) => `<a class="g-item rpl" data-nav="${n.id}" href="${n.href}">${icon(n.ic, 22)}<span>${n.label}</span></a>`;
+
+function renderGuide() {
+  const s = allChannels();
+  const you = [...YOU, ...(account.connected ? [{ id: 'liked', href: '#/liked', label: 'Vídeos curtidos', ic: 'heart' }] : []),
+    { id: 'account', href: '#/account', label: account.connected ? 'Conta do YouTube' : 'Conectar conta', ic: 'key' }];
+  $('#guide').innerHTML = `
+    <div class="guide-head">
+      <button class="icon-btn rpl" data-menu aria-label="Fechar menu">${icon('menu', 24)}</button>
+      <a class="logo" href="#/" aria-label="MeuTube, início">${logo()}</a>
+    </div>
+    <div class="g-section">${NAV.map(navItem).join('')}</div>
+    <div class="g-section"><a class="g-title rpl" href="#/history">Você ${icon('chevron', 16)}</a>${you.map(navItem).join('')}
+      ${lib.playlists().slice(0, 8).map((p) => `<a class="g-item g-pl rpl" data-nav="pl-${p.id}" href="#/playlist/${p.id}">${icon('playlist', 20)}<span>${esc(p.name)}</span></a>`).join('')}</div>
+    <div class="g-section"><h3 class="g-title">Só no MeuTube</h3>${EXTRA.map(navItem).join('')}</div>
+    ${s.length ? `<div class="g-section"><h3 class="g-title">Inscrições</h3>${s.map((c) => `<a class="g-item g-ch rpl" data-nav="ch-${c.id}" href="#/channel/${c.id}">${avatar(c.name, c.avatar, 'xs', c.id)}<span>${esc(c.name)}</span>${liveChannels.has(c.id) ? '<i class="g-live" title="Ao vivo agora"></i>' : ''}</a>`).join('')}</div>` : ''}
+    <p class="g-foot">Sem anúncios. ${account.connected ? 'Conta do YouTube conectada.' : 'Inscrições, histórico e “assistir mais tarde” ficam salvos só neste navegador.'}</p>`;
+  const mini = [...NAV, YOU[2], YOU[1], YOU[0]].map((n) => `<a class="m-item rpl" data-nav="${n.id}" href="${n.href}">${icon(n.ic, 22)}<span>${n.label === 'Assistir mais tarde' ? 'Mais tarde' : n.label}</span></a>`).join('');
+  $('#mini').innerHTML = mini;
+  $('#bottom').innerHTML = mini;
+  markNav();
+}
+
+function markNav() {
+  const h = location.hash.slice(1) || '/';
+  const parts = h.split('/');
+  const section = parts[1] === 'channel' ? `ch-${parts[2]}` : parts[1] === 'playlist' ? `pl-${parts[2]}` : (parts[1] || 'home').split('?')[0];
+  $$('[data-nav]').forEach((a) => {
+    const on = a.dataset.nav === section;
+    a.classList.toggle('on', on);
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+}
+
+function layout() {
+  const w = innerWidth;
+  const watching = body.classList.contains('watching');
+  const docked = !watching && w >= 1312 && !store.get('guideCollapsed', false);
+  body.classList.toggle('docked', docked);
+  body.classList.toggle('mini', !watching && !docked && w >= 792);
+  if (docked) body.classList.remove('drawer-open');
+}
+function toggleGuide() {
+  if (!body.classList.contains('watching') && innerWidth >= 1312) {
+    store.set('guideCollapsed', !store.get('guideCollapsed', false));
+    return layout();
+  }
+  body.classList.toggle('drawer-open');
+}
+
+// ---------- navegação ----------
+let token = 0;
+let player = null;
+
+function go(hash, fromEl) {
+  body.classList.remove('drawer-open');
+  if (hash === location.hash) return route();
+  const run = () => { history.pushState(null, '', hash); route(); };
+  if (!document.startViewTransition || reduced || document.hidden) return run();
+  $$('.player').forEach((p) => (p.style.viewTransitionName = 'none'));
+  if (fromEl) fromEl.style.viewTransitionName = 'media';
+  const vt = document.startViewTransition(run);
+  // Se a animação for interrompida, a navegação acontece do mesmo jeito; só ignoramos o aviso.
+  vt.ready.catch(() => {});
+  vt.finished.catch(() => {});
+}
+
+// Rolagem: ao voltar (botão Voltar), a página reabre onde você estava.
+const scrollPos = new Map();
+let lastHash = location.hash;
+let fromPop = false;
+function restoreScroll(y) {
+  if (!y) return;
+  // A lista chega em seguida; tenta algumas vezes até a página ter altura suficiente.
+  [0, 120, 400, 900, 1600].forEach((ms) => setTimeout(() => {
+    if (Math.abs(scrollY - y) > 4 && document.documentElement.scrollHeight - innerHeight >= y - 4) window.scrollTo({ top: y, behavior: 'instant' });
+  }, ms));
+}
+
+function route() {
+  const t = ++token;
+  scrollPos.set(lastHash, scrollY);
+  lastHash = location.hash;
+  const restore = fromPop ? scrollPos.get(location.hash) : 0;
+  fromPop = false;
+  closePopups();
+  player?.destroy();
+  player = null;
+  const h = location.hash.slice(1) || '/';
+  body.classList.toggle('watching', h.startsWith('/watch/'));
+  body.classList.remove('drawer-open');
+  layout();
+  markNav();
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  restoreScroll(restore);
+  let m;
+  if ((m = h.match(/^\/watch\/([\w-]{11})/))) return watchView(m[1], t, new URLSearchParams(h.split('?')[1] || '').get('list'));
+  if ((m = h.match(/^\/playlist\/(\w+)/))) return playlistView(m[1]);
+  if (h === '/playlists') return playlistsView();
+  if (h === '/stats') return statsView();
+  if (h === '/settings') return settingsView();
+  if ((m = h.match(/^\/search\/(.+)$/))) return searchView(decodeURIComponent(m[1]), t);
+  if ((m = h.match(/^\/channel\/(UC[\w-]{22})/))) return channelView(m[1], t);
+  if (h === '/subs') return subsView(t);
+  if (h === '/later') return laterView(t);
+  if (h === '/history') return historyView(t);
+  if (h === '/liked') return likedView(t);
+  if (h === '/account') return accountView();
+  return homeView(t);
+}
+
+// ---------- telas ----------
+const CHIPS = ['Tudo', 'Música', 'Podcasts', 'Games', 'Notícias', 'Ao vivo', 'Ciência', 'Tecnologia', 'Culinária', 'Esportes', 'Humor', 'Viagem', 'Documentários', 'Mixes'];
+
+function homeView(t) {
+  const chips = account.connected ? ['Para você', ...CHIPS] : CHIPS;
+  let active = store.get('chip', chips[0]);
+  if (!chips.includes(active)) active = chips[0];
+  document.title = 'MeuTube';
+  $('#q').value = '';
+  app.innerHTML = `<section class="view home">
+    <div class="chips-bar"><div class="chips has-ind" role="tablist" aria-label="Temas"><span class="chip-ind" aria-hidden="true"></span>${chips.map((c) => `<button class="chip rpl ${c === active ? 'on' : ''}" role="tab" aria-selected="${c === active}" data-chip="${esc(c)}">${esc(c)}</button>`).join('')}</div></div>
+    <div id="subs-top"></div>
+    <div id="feed"></div>
+  </section>`;
+  loadChip(active, t);
+  loadSubsTop(t);
+}
+
+// ---------- topo da tela inicial: quem você segue está ao vivo / postou vídeo novo ----------
+// Conta conectada: o feed de inscrições do YouTube já vem em ordem de postagem e marca quem está ao vivo.
+// Canais seguidos só no MeuTube: lives pela aba "Ao vivo" de cada canal; vídeos pelas páginas dos canais.
+// "Novo" = ainda não estava na lista da última vez que você abriu o início (o YouTube não manda a data no feed).
+let liveChannels = new Set();
+const rail = (items) => `<div class="rail">${items.map((v, i) => gridCard(v, i)).join('')}</div>`;
+async function loadSubsTop(t) {
+  const box = $('#subs-top');
+  const localOnly = subs().filter((c) => !accountChannels.some((a) => a.id === c.id));
+  if (!box || (!account.connected && !subs().length)) return;
+  const [feedR, localLive, localNews] = await Promise.all([
+    account.connected ? api('/api/feed?k=subs').catch(() => null) : null,
+    localOnly.length ? api('/api/live-now?ids=' + localOnly.slice(0, 12).map((c) => c.id).join(',')).catch(() => []) : [],
+    !account.connected ? subsFeed().catch(() => []) : [],
+  ]);
+  if (t !== token || !box.isConnected) return;
+  const all = [...(feedR?.items || []), ...localLive, ...localNews].filter((v) => !lib.isBlocked(v));
+  const seenIds = new Set();
+  const uniq = all.filter((v) => !seenIds.has(v.id) && seenIds.add(v.id));
+  const lives = uniq.filter((v) => v.live);
+  const news = uniq.filter((v) => !v.live).slice(0, 16);
+  remember(uniq);
+
+  const before = store.get('subsSeen', null);
+  const wasSeen = new Set(before || news.map((v) => v.id)); // primeira vez: nada aparece como novo
+  const fresh = news.filter((v) => !wasSeen.has(v.id));
+  store.set('subsSeen', [...new Set([...news.map((v) => v.id), ...(before || [])])].slice(0, 400));
+
+  liveChannels = new Set(lives.map((v) => v.channelId));
+  renderGuide();
+
+  box.innerHTML = `${lives.length ? `<section class="subs-sec live-sec">
+      <h3 class="sec-title rail-title"><span class="live-dot" aria-hidden="true"></span>Ao vivo agora<span class="meta sm">${lives.length === 1 ? '1 canal que você segue' : `${lives.length} lives de quem você segue`}</span></h3>
+      ${rail(lives)}
+    </section>` : ''}
+    ${news.length ? `<section class="subs-sec">
+      <h3 class="sec-title rail-title">${icon('subs', 20)}Novos das suas inscrições${fresh.length ? `<span class="new-count">${fresh.length} ${fresh.length === 1 ? 'novo' : 'novos'}</span>` : ''}<a class="rail-more" href="#/subs">Ver tudo ${icon('chevron', 16)}</a></h3>
+      ${rail([...fresh, ...news.filter((v) => !fresh.includes(v))])}
+    </section>` : ''}`;
+  fresh.forEach((v) => box.querySelector(`[data-vid="${v.id}"] .thumb`)?.insertAdjacentHTML('beforeend', '<span class="new-badge">NOVO</span>'));
+}
+
+async function loadChip(chip, t) {
+  store.set('chip', chip);
+  $$('[data-chip]').forEach((b) => {
+    const on = b.dataset.chip === chip;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+  });
+  moveChipInd();
+  const feed = $('#feed');
+  feed.innerHTML = skGrid();
+  const myLoad = ++chipLoad; // trocar de tema no meio do carregamento descarta a resposta antiga
+  // Cada tema sabe buscar a página N: recomendações da conta, inscrições locais ou uma busca.
+  const query = chip === 'Tudo' ? 'em alta brasil' : chip === 'Mixes' ? 'mix música brasileira' : chip;
+  // "Ao vivo" usa o filtro de lives do YouTube: só transmissões acontecendo agora.
+  const live = chip === 'Ao vivo' ? '&live=1' : '';
+  const searchPage = async (p) => { const r = await api(`/api/search?ch=0&page=${p}${live}&q=${encodeURIComponent(query)}`); return { items: r.videos, more: r.more }; };
+  const load = chip === 'Para você' ? (p) => api(`/api/feed?k=rec&page=${p}`)
+    : chip === 'Tudo' && subs().length ? async (p) => (p === 0 ? { items: await subsFeed(), more: true } : searchPage(p - 1))
+    : searchPage;
+  try {
+    const r = await load(0);
+    if (t !== token || myLoad !== chipLoad) return;
+    feed.innerHTML = r.items.length ? grid(r.items) : empty('film', 'Nada por aqui', 'Tente outro tema.');
+    if (r.more) infinite($('#feed .grid'), load, t);
+  } catch (e) {
+    if (t === token && myLoad === chipLoad) feed.innerHTML = failure(e);
+  }
+}
+let chipLoad = 0;
+
+async function subsFeed() {
+  const chans = subs();
+  const results = [];
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(4, chans.length) }, async () => {
+    while (i < chans.length) {
+      const c = chans[i++];
+      results.push(await api('/api/channel?id=' + c.id).catch(() => null));
+    }
+  }));
+  // Intercala os vídeos mais novos de cada canal.
+  const lists = results.filter(Boolean).map((r) => r.videos.slice(0, 8));
+  const out = [];
+  for (let k = 0; k < 8; k++) for (const l of lists) if (l[k]) out.push(l[k]);
+  return out;
+}
+
+let lastSearch = null;
+async function searchView(term, t) {
+  $('#q').value = term;
+  document.title = `${term} - MeuTube`;
+  const filter = 'Tudo';
+  app.innerHTML = `<section class="view search-view">
+    <div class="chips filters has-ind" role="tablist" aria-label="Filtros"><span class="chip-ind" aria-hidden="true"></span>${['Tudo', 'Vídeos', 'Canais'].map((c) => `<button class="chip rpl ${c === filter ? 'on' : ''}" role="tab" aria-selected="${c === filter}" data-filter="${c}">${c}</button>`).join('')}</div>
+    <div id="res">${skRows()}</div>
+  </section>`;
+  moveChipInd();
+  try {
+    const r = await api('/api/search?q=' + encodeURIComponent(term));
+    if (t !== token) return;
+    lastSearch = { ...r, term, page: 1, t };
+    renderResults('Tudo');
+  } catch (e) {
+    if (t === token) $('#res').innerHTML = failure(e);
+  }
+}
+
+function renderResults(filter) {
+  const r = lastSearch;
+  if (!r || !$('#res')) return;
+  $$('[data-filter]').forEach((b) => { const on = b.dataset.filter === filter; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); });
+  moveChipInd();
+  const chans = filter !== 'Vídeos' ? r.channels : [];
+  const vids = filter !== 'Canais' ? r.videos : [];
+  if (!chans.length && !vids.length) {
+    $('#res').innerHTML = empty('search', 'Nenhum resultado encontrado', filter === 'Canais' ? 'Nenhum canal com esse nome.' : 'Tente outras palavras.');
+    return;
+  }
+  $('#res').innerHTML = `${chans.length ? `<div class="ch-rows">${chans.map(channelRow).join('')}</div>${vids.length ? '<hr class="divider">' : ''}` : ''}${vids.length ? rows(vids) : ''}`;
+  // Mais resultados ao rolar; as páginas novas também entram no filtro "Tudo/Vídeos".
+  if (vids.length && r.more) {
+    infinite($('#res .rows'), async (p) => {
+      const n = await api(`/api/search?ch=0&page=${p}&q=${encodeURIComponent(r.term)}`);
+      return { items: n.videos, more: n.more };
+    }, r.t, { page: r.page, onItems: (items) => { r.videos.push(...items); r.page++; } });
+  }
+}
+
+function linkify(text) {
+  return esc(text)
+    .replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`)
+    .replace(/(^|\s)((?:\d{1,2}:)?\d{1,2}:\d{2})(?=\s|$)/gm, (all, pre, ts) => {
+      const s = ts.split(':').reduce((acc, n) => acc * 60 + Number(n), 0);
+      return `${pre}<button class="ts" data-seek="${s}">${ts}</button>`;
+    })
+    .replace(/(^|\s)(#[\p{L}\p{N}_]+)/gu, '$1<span class="tag">$2</span>');
+}
+
+// ---------- fila da playlist (tocando uma playlist) ----------
+const queueMode = () => store.get('queueMode', { shuffle: false, loop: false });
+function queueHtml(pl, id) {
+  const idx = pl.items.findIndex((v) => v.id === id);
+  const q = queueMode();
+  return `<div class="queue" id="queue">
+    <div class="q-head">
+      <div><a class="q-title" href="#/playlist/${pl.id}">${esc(pl.name)}</a><span class="meta sm">${idx + 1} / ${pl.items.length}</span></div>
+      <div class="q-tools">
+        <button class="icon-btn rpl ${q.loop ? 'on' : ''}" data-queue="loop" aria-pressed="${q.loop}" title="Repetir a playlist">${icon('repeat', 18)}</button>
+        <button class="icon-btn rpl ${q.shuffle ? 'on' : ''}" data-queue="shuffle" aria-pressed="${q.shuffle}" title="Ordem aleatória">${icon('shuffle', 18)}</button>
+      </div>
+    </div>
+    <div class="q-list">${pl.items.map((v, i) => `<a class="q-item ${v.id === id ? 'on' : ''}" href="#/watch/${v.id}?list=${pl.id}">
+      <span class="q-n">${v.id === id ? icon('play', 12) : i + 1}</span>
+      <img src="${esc(thumbUrl(v))}" alt="" loading="lazy"><span class="q-text"><b>${esc(v.title)}</b><span class="meta xs">${esc(v.channel)}</span></span></a>`).join('')}</div>
+  </div>`;
+}
+function queueNext(pl, id) {
+  const items = pl.items;
+  if (!items.length) return null;
+  const q = queueMode();
+  const idx = items.findIndex((v) => v.id === id);
+  if (q.shuffle) {
+    const others = items.filter((v) => v.id !== id);
+    return others.length ? others[Math.floor(Math.random() * others.length)] : null;
+  }
+  if (idx + 1 < items.length) return items[idx + 1];
+  return q.loop ? items[0] : null;
+}
+
+// ---------- momentos marcados ----------
+function renderMarks(id) {
+  const box = $('#w-marks');
+  if (!box) return;
+  const list = lib.marks(id);
+  player?.setMarks(list);
+  box.innerHTML = list.length ? `<div class="marks">
+    <h3 class="sec-title sm">${icon('bookmark', 18)}Seus momentos <span class="meta sm">aparecem como pontinhos na barra do vídeo</span></h3>
+    ${list.map((mk, i) => `<div class="mark" style="--i:${i}">
+      <button class="ts mark-t" data-seek="${mk.t}">${dur(mk.t) || '0:00'}</button>
+      <input class="mark-note" data-mark-note="${i}" value="${esc(mk.note)}" placeholder="Escreva uma nota (opcional)" aria-label="Nota do momento ${dur(mk.t)}">
+      <button class="icon-btn rpl" data-mark-del="${i}" aria-label="Apagar momento">${icon('trash', 16)}</button>
+    </div>`).join('')}</div>` : '';
+}
+
+async function watchView(id, t, listId) {
+  const m = known.get(id) || {};
+  const pl = listId ? lib.getPlaylist(listId) : null;
+  const autoplay = store.get('autoplay', true);
+  document.title = m.title ? `${m.title} - MeuTube` : 'MeuTube';
+  app.innerHTML = `<section class="view watch">
+    <div class="w-main">
+      <div class="ambient" aria-hidden="true"><img src="https://i.ytimg.com/vi/${id}/mqdefault.jpg" alt=""></div>
+      <div class="player loading" id="player" style="view-transition-name:media">
+        <img class="poster" src="https://i.ytimg.com/vi/${id}/maxresdefault.jpg" alt="" onerror="this.onerror=null;this.src='https://i.ytimg.com/vi/${id}/hqdefault.jpg'">
+        <div class="p-spin" aria-hidden="true"></div>
+      </div>
+      <h1 class="w-title enter" style="--d:120ms">${m.title ? esc(m.title) : '<i class="sk-line"></i>'}</h1>
+      <div class="w-row enter" style="--d:200ms" id="w-row"></div>
+      <div id="w-desc" class="enter" style="--d:280ms"></div>
+      <div id="w-marks"></div>
+      <div id="w-comments"></div>
+    </div>
+    <aside class="w-side enter" style="--d:160ms">
+      <div id="w-chat"></div>
+      ${pl ? queueHtml(pl, id) : ''}
+      <div class="side-head">
+        <div class="chips small"><button class="chip on">A seguir</button>${m.channel ? `<span class="chip ghost">De ${esc(m.channel)}</span>` : ''}</div>
+        <label class="switch" title="Reprodução automática"><input type="checkbox" id="autoplay" ${autoplay ? 'checked' : ''}><span>Automático</span></label>
+      </div>
+      <div id="related">${skCompact()}</div>
+    </aside>
+  </section>`;
+  $('#autoplay').addEventListener('change', (e) => store.set('autoplay', e.target.checked));
+
+  let info;
+  try {
+    info = await api('/api/video?id=' + id);
+  } catch (e) {
+    if (t !== token) return;
+    $('#player').classList.remove('loading');
+    $('#w-desc').innerHTML = failure(e);
+    $('#related').innerHTML = '';
+    return;
+  }
+  if (t !== token) return;
+
+  const ch = { id: info.channelId, name: info.channel, avatar: info.avatar || m.avatar || '', verified: info.verified };
+  known.set(id, { ...m, ...slim(info), avatar: ch.avatar, thumb: m.thumb });
+  document.title = `${info.title} - MeuTube`;
+  $('.w-title').textContent = info.title;
+  $('#w-row').innerHTML = `
+    <div class="w-owner">
+      ${info.channelId ? `<a href="#/channel/${info.channelId}" class="av-link" id="w-av" tabindex="-1" aria-hidden="true">${avatar(ch.name, ch.avatar, 'md', ch.id)}</a>` : avatar(ch.name, ch.avatar, 'md')}
+      <div class="w-owner-text"><a class="ch-name" href="#/channel/${info.channelId}">${esc(info.channel)}${vf(info.verified)}</a>
+      <span class="meta xs" id="w-subs">${subsCount(info.followers)}</span></div>
+      ${info.channelId ? subButton(ch) : ''}
+    </div>
+    <div class="w-actions">
+      <span class="pill votes" id="w-votes" title="Gostei / Não gostei">${icon('like', 20)}${info.likes ? nf.format(info.likes) : '—'}</span>
+      <button class="pill rpl" data-save="${id}">${icon('listPlus', 20)}Salvar</button>
+      <button class="pill rpl" data-mark title="Guarda o momento atual do vídeo com uma nota">${icon('bookmark', 20)}Marcar momento</button>
+      <button class="pill rpl" data-share="${id}">${icon('share', 20)}Compartilhar</button>
+      ${info.live ? '' : downloadMenu(info)}
+    </div>`;
+  const watching = (n) => `<span id="w-watching">${n ? `${nf.format(n)} assistindo agora` : ''}</span>`;
+  const liveSince = info.startedAt ? `ao vivo desde ${new Date(info.startedAt * 1000).toLocaleString('pt-BR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : 'ao vivo';
+  $('#w-desc').innerHTML = `<div class="desc" id="desc" tabindex="0" role="button" aria-expanded="false">
+    <div class="d-meta">${info.live ? dot(watching(info.viewers), liveSince) : dot(views(info.views), ago(info.date))}</div>
+    <div class="d-text">${linkify(info.description) || 'Sem descrição.'}</div>
+    <span class="d-more">...mais</span><span class="d-less">Mostrar menos</span>
+  </div>`;
+
+  // Chat da live na lateral (atualiza sozinho) e comentários abaixo da descrição (carregam ao rolar até eles).
+  const alive = () => t === token;
+  if (info.live) {
+    mountChat($('#w-chat'), id, { alive, toast, onViewers: (n) => { const w = $('#w-watching'); if (w) w.textContent = `${nf.format(n)} assistindo agora`; } });
+  }
+  mountComments($('#w-comments'), id, { alive, toast });
+
+  // Foto e inscritos do canal: se o servidor ainda não conhece, busca na página do canal.
+  if ((!ch.avatar || !info.followers) && info.channelId) {
+    api('/api/channel?id=' + info.channelId).then((c) => {
+      if (t !== token) return;
+      if (c.followers) $('#w-subs').textContent = subsCount(c.followers);
+      if (!c.avatar) return;
+      $('#w-av').innerHTML = avatar(c.name, c.avatar, 'md');
+      const s = subs().map((x) => (x.id === c.id ? { ...x, avatar: c.avatar } : x));
+      store.set('subs', s);
+    }).catch(() => {});
+  }
+
+  const hist = store.get('history', []).filter((x) => x.id !== id);
+  store.set('history', [{ ...slim(known.get(id)), date: info.date }, ...hist].slice(0, 200));
+
+  const el = $('#player');
+  el.querySelector('.poster')?.remove();
+  el.querySelector('.p-spin')?.remove();
+  let related = [];
+  const cfg = lib.settings();
+  if (!info.qualities.length) {
+    el.classList.remove('loading');
+    el.insertAdjacentHTML('beforeend', `<div class="p-error">${icon('alert', 32)}<p>Este vídeo não tem um formato que o navegador consiga tocar.</p></div>`);
+  } else {
+    // Próximo: na playlist segue a fila (aleatória/repetindo se ligado); fora dela, a primeira sugestão.
+    const next = () => {
+      const fresh = pl && lib.getPlaylist(pl.id);
+      const n = fresh ? queueNext(fresh, id) : related[0];
+      if (n) go(`#/watch/${n.id}${fresh ? `?list=${fresh.id}` : ''}`, fresh ? null : $('#related .thumb'));
+      else if (fresh) toast('Fim da playlist');
+    };
+    const p = progress()[id];
+    player = new Player(el, info, {
+      start: p && p.d - p.t > 15 ? p.t : 0,
+      rate: lib.channelSpeed(info.channelId),
+      onNext: next,
+      onEnded: () => { if (pl || $('#autoplay')?.checked) next(); },
+      onProgress: (time, d) => {
+        if (info.live) return; // live não tem "continuar de onde parou"
+        const all = progress();
+        if (time > 10 && d - time > 15) all[id] = { t: Math.round(time), d: Math.round(d) };
+        else if (d - time <= 15) delete all[id];
+        store.set('progress', all);
+      },
+      onTick: (secs) => lib.addWatch(secs, known.get(id) || slim(info)),
+      onToast: toast,
+      onRate: (r) => {
+        lib.setChannelSpeed(info.channelId, r);
+        if (info.channelId) toast(r === 1 ? 'Velocidade normal para este canal' : `${String(r).replace('.', ',')}x lembrada para ${info.channel}`);
+      },
+      onSkipToggle: (on) => { lib.setSetting('sponsor', on); toast(on ? 'Vou pular patrocínios' : 'Patrocínios não serão pulados'); },
+    });
+    renderMarks(id);
+    // Extras em paralelo: trechos de patrocínio (SponsorBlock). Busca sempre, para os trechos aparecerem
+    // na barra e o pulo poder ser ligado no menu ⚙ mesmo se estiver desligado nos Ajustes.
+    api('/api/segments?id=' + id).then((segs) => {
+      if (t !== token || !player) return;
+      player.setSegments(segs.filter((s) => cfg.sponsorCats.includes(s.category)), cfg.sponsor);
+    }).catch(() => {});
+    // Pré-carrega o próximo da playlist para a troca ser instantânea.
+    const n = pl && queueNext(pl, id);
+    if (n && !queueMode().shuffle) fetch('/api/prefetch?id=' + n.id).catch(() => {});
+  }
+  if (cfg.dislikes) {
+    api('/api/votes?id=' + id).then((vt) => {
+      if (t !== token || !vt) return;
+      const likes = info.likes || vt.likes;
+      const total = likes + vt.dislikes;
+      $('#w-votes').outerHTML = `<span class="pill votes" id="w-votes" title="“Não gostei” estimado pelo Return YouTube Dislike">
+        ${icon('like', 20)}${nf.format(likes)}<i class="v-sep"></i>${icon('dislike', 20)}${nf.format(vt.dislikes)}
+        <span class="v-bar"><i style="width:${total ? (likes / total) * 100 : 100}%"></i></span></span>`;
+    }).catch(() => {});
+  }
+  related = await loadRelated(info, t);
+}
+
+async function loadRelated(info, t) {
+  try {
+    const words = info.title.replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w.length > 2).slice(0, 4).join(' ');
+    const q = encodeURIComponent(`${info.channel} ${words}`);
+    const r = await api('/api/search?ch=0&q=' + q);
+    const items = r.videos.filter((v) => v.id !== info.id);
+    if (t !== token) return [];
+    $('#related').innerHTML = items.length ? compacts(items) : empty('film', 'Sem sugestões');
+    if (items.length && r.more) {
+      infinite($('#related .compacts'), async (p) => {
+        const n = await api(`/api/search?ch=0&page=${p}&q=${q}`);
+        return { items: n.videos.filter((v) => v.id !== info.id), more: n.more };
+      }, t);
+    }
+    return items;
+  } catch {
+    if (t === token) $('#related').innerHTML = '';
+    return [];
+  }
+}
+
+async function channelView(cid, t) {
+  const s = subs().find((x) => x.id === cid);
+  app.innerHTML = `<section class="view channel">
+    <div id="ch-top"><div class="banner sk-block"></div>
+      <div class="ch-head">${avatar(s?.name, s?.avatar, 'xxl', cid)}<div class="ch-info"><i class="sk-line"></i><i class="sk-line short"></i></div></div></div>
+    <div class="tabs" role="tablist"><button class="tab on" role="tab" aria-selected="true">Vídeos</button></div>
+    <div id="ch-videos">${skGrid()}</div>
+  </section>`;
+  try {
+    const c = await api('/api/channel?id=' + cid);
+    if (t !== token) return;
+    document.title = `${c.name} - MeuTube`;
+    if (s && c.avatar && s.avatar !== c.avatar) { store.set('subs', subs().map((x) => (x.id === cid ? { ...x, avatar: c.avatar } : x))); renderGuide(); }
+    $('#ch-top').innerHTML = `
+      ${c.banner ? `<div class="banner"><img src="${esc(c.banner)}" alt="" referrerpolicy="no-referrer"></div>` : ''}
+      <div class="ch-head">
+        ${avatar(c.name, c.avatar, 'xxl', cid)}
+        <div class="ch-info">
+          <h1>${esc(c.name)}${vf(c.verified)}</h1>
+          <p class="meta">${dot(c.handle ? `<strong>${esc(c.handle)}</strong>` : '', subsCount(c.followers), c.videos.length ? `${c.videos.length}+ vídeos` : '')}</p>
+          ${c.description ? `<p class="meta ch-desc">${esc(c.description)}</p>` : ''}
+          ${subButton(c, 'lg')}
+        </div>
+      </div>`;
+    $('#ch-videos').innerHTML = c.videos.length ? grid(c.videos) : empty('film', 'Este canal não tem vídeos públicos');
+    if (c.videos.length && c.more) {
+      infinite($('#ch-videos .grid'), async (p) => {
+        const n = await api(`/api/channel?id=${cid}&page=${p}`);
+        return { items: n.videos, more: n.more };
+      }, t);
+    }
+  } catch (e) {
+    if (t === token) { $('#ch-top').remove(); $('#ch-videos').innerHTML = failure(e); }
+  }
+}
+
+const connectCta = (text) => `<a class="connect-cta rpl" href="#/account">${icon('key', 20)}<span>${text}</span>${icon('chevron', 18)}</a>`;
+
+async function subsView(t) {
+  const s = allChannels();
+  document.title = 'Inscrições - MeuTube';
+  if (!s.length && !account.connected) {
+    app.innerHTML = `<section class="view">${empty('subs', 'Não perca os vídeos novos', 'Inscreva-se em canais pela busca, por um vídeo ou pela página do canal. Os vídeos novos aparecem aqui.')}
+      <div class="center">${connectCta('Ou conecte sua conta do YouTube para trazer suas inscrições')}</div></section>`;
+    return;
+  }
+  const local = new Set(subs().map((c) => c.id));
+  app.innerHTML = `<section class="view">
+    <div class="page-head"><h2>Inscrições</h2></div>
+    ${s.length ? `<div class="ch-strip">${s.map((c, i) => `<div class="ch-tile" ${stagger(i)}><a href="#/channel/${c.id}">${avatar(c.name, c.avatar, 'lg', c.id)}<span>${esc(c.name)}</span></a>${local.has(c.id) ? `<button class="unsub rpl" data-sub="${c.id}" data-name="${esc(c.name)}" data-avatar="${esc(c.avatar || '')}" aria-label="Cancelar inscrição em ${esc(c.name)}">${icon('x', 14)}</button>` : ''}</div>`).join('')}</div>` : ''}
+    <h3 class="sec-title">Mais recentes</h3>
+    <div id="sfeed">${skGrid()}</div>
+  </section>`;
+  try {
+    const r = account.connected ? await api('/api/feed?k=subs') : { items: await subsFeed(), more: false };
+    if (t !== token) return;
+    $('#sfeed').innerHTML = r.items.length ? grid(r.items) : empty('film', 'Nenhum vídeo novo');
+    if (r.items.length && r.more) infinite($('#sfeed .grid'), (p) => api(`/api/feed?k=subs&page=${p}`), t);
+  } catch (e) {
+    if (t === token) $('#sfeed').innerHTML = failure(e);
+  }
+}
+
+function playlistPage(title, items, side, emptyHtml) {
+  return `<section class="view playlist">
+    <div class="pl-head"><h2>${title}</h2>${side}</div>
+    ${items.length ? rows(items) : emptyHtml}
+  </section>`;
+}
+
+// Abas "Neste site" / "Conta do YouTube" nas listas que existem nos dois lugares.
+const sourceTabs = (key) => {
+  if (!account.connected) return '';
+  const cur = store.get('src:' + key, 'site');
+  return `<div class="seg" role="tablist">${[['site', 'Neste site'], ['yt', 'Conta do YouTube']].map(([v, l]) => `<button class="seg-btn rpl ${cur === v ? 'on' : ''}" role="tab" aria-selected="${cur === v}" data-src="${key}:${v}">${l}</button>`).join('')}<span class="seg-pill"></span></div>`;
+};
+const fromAccount = (key) => account.connected && store.get('src:' + key, 'site') === 'yt';
+
+async function accountList(kind, t) {
+  $('#pl-list').innerHTML = skRows(5);
+  try {
+    const r = await api('/api/feed?k=' + kind);
+    if (t !== token) return;
+    $('#pl-list').innerHTML = r.items.length ? rows(r.items) : empty('film', 'Nada por aqui na sua conta');
+    if (r.items.length && r.more) infinite($('#pl-list .rows'), (p) => api(`/api/feed?k=${kind}&page=${p}`), t);
+  } catch (e) {
+    if (t === token) $('#pl-list').innerHTML = failure(e);
+  }
+}
+
+function laterView(t) {
+  const yt = fromAccount('later');
+  const items = later();
+  document.title = 'Assistir mais tarde - MeuTube';
+  app.innerHTML = `<section class="view playlist">
+    <div class="pl-head"><h2>Assistir mais tarde</h2>${sourceTabs('later')}${yt ? '' : `<span class="meta">${items.length} ${items.length === 1 ? 'vídeo' : 'vídeos'}</span>`}</div>
+    <div id="pl-list">${yt ? '' : items.length ? rows(items) : empty('clock', 'Sua lista está vazia', 'Toque no relógio de um vídeo para guardar aqui.')}</div>
+  </section>`;
+  if (yt) accountList('later', t);
+}
+
+function historyView(t) {
+  const yt = fromAccount('history');
+  const items = store.get('history', []);
+  document.title = 'Histórico - MeuTube';
+  app.innerHTML = `<section class="view playlist">
+    <div class="pl-head"><h2>Histórico de exibição</h2>${sourceTabs('history')}${!yt && items.length ? `<button class="pill rpl" data-clear>${icon('trash', 20)}Limpar histórico deste site</button>` : ''}</div>
+    <div id="pl-list">${yt ? '' : items.length ? rows(items) : empty('history', 'Nada assistido ainda', 'Os vídeos que você assistir aparecem aqui.')}</div>
+  </section>`;
+  if (yt) accountList('history', t);
+}
+
+function likedView(t) {
+  document.title = 'Vídeos curtidos - MeuTube';
+  if (!account.connected) {
+    app.innerHTML = `<section class="view">${empty('heart', 'Seus vídeos curtidos', 'Conecte sua conta do YouTube para ver os vídeos que você curtiu.')}<div class="center">${connectCta('Conectar conta do YouTube')}</div></section>`;
+    return;
+  }
+  app.innerHTML = `<section class="view playlist"><div class="pl-head"><h2>Vídeos curtidos</h2></div><div id="pl-list"></div></section>`;
+  accountList('liked', t);
+}
+
+// ---------- playlists ----------
+const relTime = (ms) => {
+  const min = (Date.now() - ms) / 60000;
+  if (min < 1) return 'agora';
+  if (min < 60) return rtf.format(-Math.round(min), 'minute');
+  if (min < 1440) return rtf.format(-Math.round(min / 60), 'hour');
+  return rtf.format(-Math.round(min / 1440), 'day');
+};
+const longDur = (secs) => (secs >= 3600 ? `${Math.floor(secs / 3600)} h ${Math.round((secs % 3600) / 60)} min` : `${Math.max(secs ? 1 : 0, Math.round(secs / 60))} min`);
+
+function plCard(p, i) {
+  const thumbs = p.items.slice(0, 4);
+  return `<a class="pl-card" href="#/playlist/${p.id}" style="--i:${Math.min(i, 16)}">
+    <div class="pl-cover" data-n="${thumbs.length}">
+      ${thumbs.length ? thumbs.map((v) => `<img src="${esc(thumbUrl(v))}" alt="" loading="lazy">`).join('') : `<span class="pl-empty">${icon('playlist', 36)}</span>`}
+      <span class="pl-count">${icon('playlist', 15)}${p.items.length}</span>
+      <span class="pl-play">${icon('play', 20)}Tocar tudo</span>
+    </div>
+    <b>${esc(p.name)}</b><span class="meta sm">${p.items.length} ${p.items.length === 1 ? 'vídeo' : 'vídeos'} · atualizada ${relTime(p.updated)}</span>
+  </a>`;
+}
+
+function playlistsView() {
+  document.title = 'Playlists - MeuTube';
+  const pls = lib.playlists();
+  app.innerHTML = `<section class="view playlists">
+    <div class="page-head split"><h2>Playlists</h2>
+      <form class="inline-form" data-form="new-pl"><input name="name" placeholder="Nome da nova playlist" maxlength="80" aria-label="Nome da nova playlist" required><button class="sub-btn rpl">${icon('plus', 16)}Criar</button></form>
+    </div>
+    <form class="import-bar" data-form="import-pl">
+      <span class="import-ic">${icon('importIc', 18)}</span>
+      <input name="list" placeholder="Cole o link de uma playlist do YouTube para trazer para cá" aria-label="Link da playlist do YouTube" required>
+      <button class="pill rpl">Importar</button>
+    </form>
+    ${pls.length ? `<div class="pl-grid">${pls.map(plCard).join('')}</div>` : empty('playlist', 'Nenhuma playlist ainda', 'Crie uma acima, importe do YouTube ou use “Salvar” num vídeo.')}
+  </section>`;
+}
+
+function plItem(v, i, pid, total) {
+  return `<div class="pl-item" draggable="true" data-idx="${i}" style="--i:${Math.min(i, 16)}">
+    <span class="grip" title="Arraste para reordenar">${icon('grip', 18)}</span>
+    <span class="pl-n">${i + 1}</span>
+    <a class="pl-thumb" href="#/watch/${v.id}?list=${pid}" draggable="false"><img src="${esc(thumbUrl(v))}" alt="" loading="lazy">${v.duration ? `<span class="dur">${dur(v.duration)}</span>` : ''}</a>
+    <div class="pl-text"><a class="title sm" href="#/watch/${v.id}?list=${pid}" draggable="false">${esc(v.title)}</a><span class="meta sm">${esc(v.channel)}</span></div>
+    <div class="pl-tools">
+      <button class="icon-btn rpl" data-pl-move="${i}:-1" ${i === 0 ? 'disabled' : ''} aria-label="Subir">${icon('chevronLeft', 16)}</button>
+      <button class="icon-btn rpl" data-pl-move="${i}:1" ${i === total - 1 ? 'disabled' : ''} aria-label="Descer">${icon('chevron', 16)}</button>
+      <button class="icon-btn rpl" data-pl-remove="${v.id}" aria-label="Tirar da playlist">${icon('x', 18)}</button>
+    </div>
+  </div>`;
+}
+
+function playlistView(id) {
+  const p = lib.getPlaylist(id);
+  if (!p) { app.innerHTML = `<section class="view">${empty('playlist', 'Playlist não encontrada', 'Ela pode ter sido apagada.')}</section>`; return; }
+  document.title = `${p.name} - MeuTube`;
+  const total = p.items.reduce((a, v) => a + (v.duration || 0), 0);
+  const cover = p.items[0];
+  app.innerHTML = `<section class="view pl-page">
+    <div class="pl-hero">
+      ${cover ? `<div class="pl-hero-bg" aria-hidden="true"><img src="https://i.ytimg.com/vi/${cover.id}/mqdefault.jpg" alt=""></div>` : ''}
+      <div class="pl-hero-cover">${cover ? `<img src="${esc(thumbUrl(cover))}" alt="">` : icon('playlist', 56)}</div>
+      <div class="pl-hero-info">
+        <p class="eyebrow">Playlist</p>
+        <h1 class="pl-name" id="pl-name">${esc(p.name)}</h1>
+        <p class="meta">${dot(`${p.items.length} ${p.items.length === 1 ? 'vídeo' : 'vídeos'}`, total ? longDur(total) : '', `atualizada ${relTime(p.updated)}`)}</p>
+        <div class="pl-actions">
+          <button class="sub-btn rpl" data-pl-play="${id}" ${p.items.length ? '' : 'disabled'}>${icon('play', 16)}Tocar tudo</button>
+          <button class="pill rpl" data-pl-shuffle="${id}" ${p.items.length ? '' : 'disabled'}>${icon('shuffle', 18)}Aleatório</button>
+          <button class="pill rpl" data-pl-rename="${id}">${icon('edit', 18)}Renomear</button>
+          <button class="pill rpl danger" data-pl-delete="${id}">${icon('trash', 18)}Apagar</button>
+        </div>
+      </div>
+    </div>
+    <div class="pl-items" id="pl-items" data-pid="${id}">${p.items.length ? p.items.map((v, i) => plItem(v, i, id, p.items.length)).join('') : empty('listPlus', 'Playlist vazia', 'Use o botão “Salvar” num vídeo ou o menu ⋯ das miniaturas.')}</div>
+  </section>`;
+}
+function refreshPlItems(pid) {
+  const p = lib.getPlaylist(pid);
+  const box = $('#pl-items');
+  if (!p || !box) return;
+  box.innerHTML = p.items.length ? p.items.map((v, i) => plItem(v, i, pid, p.items.length)).join('') : empty('listPlus', 'Playlist vazia');
+  $$('.pl-item', box).forEach((el) => (el.style.animation = 'none'));
+}
+
+// Arrastar para reordenar
+let dragFrom = null;
+document.addEventListener('dragstart', (e) => {
+  const it = e.target.closest?.('.pl-item');
+  if (!it) return;
+  dragFrom = Number(it.dataset.idx);
+  it.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+});
+document.addEventListener('dragover', (e) => {
+  const it = e.target.closest?.('.pl-item');
+  if (!it || dragFrom == null) return;
+  e.preventDefault();
+  $$('.pl-item.over').forEach((x) => x !== it && x.classList.remove('over'));
+  it.classList.add('over');
+});
+document.addEventListener('drop', (e) => {
+  const it = e.target.closest?.('.pl-item');
+  if (!it || dragFrom == null) return;
+  e.preventDefault();
+  const pid = $('#pl-items').dataset.pid;
+  lib.movePlaylistItem(pid, dragFrom, Number(it.dataset.idx));
+  dragFrom = null;
+  refreshPlItems(pid);
+});
+document.addEventListener('dragend', () => { dragFrom = null; $$('.pl-item.dragging, .pl-item.over').forEach((x) => x.classList.remove('dragging', 'over')); });
+
+// ---------- janela "Salvar em…" ----------
+let modalVideo = null;
+function closePopups() {
+  $('.pop')?.remove();
+  const back = $('.modal-back');
+  if (back) { back.classList.add('closing'); setTimeout(() => back.remove(), 220); }
+}
+function openSaveModal(v) {
+  closePopups();
+  modalVideo = v;
+  const pls = lib.playlists();
+  document.body.insertAdjacentHTML('beforeend', `<div class="modal-back" data-close-modal>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="save-title">
+      <div class="modal-head"><h3 id="save-title">Salvar em…</h3><button class="icon-btn rpl" data-close-modal aria-label="Fechar">${icon('x', 20)}</button></div>
+      <div class="modal-video"><img src="${esc(thumbUrl(v))}" alt=""><span>${esc(v.title || '')}</span></div>
+      <div class="save-list">
+        <label class="save-opt"><input type="checkbox" data-save-later="${v.id}" ${isLater(v.id) ? 'checked' : ''}><span class="box">${icon('check', 14)}</span>${icon('clock', 18)}<span class="so-name">Assistir mais tarde</span></label>
+        ${pls.map((p) => `<label class="save-opt"><input type="checkbox" data-save-pl="${p.id}" ${lib.inPlaylist(p.id, v.id) ? 'checked' : ''}><span class="box">${icon('check', 14)}</span>${icon('playlist', 18)}<span class="so-name">${esc(p.name)}</span><span class="meta xs">${p.items.length}</span></label>`).join('')}
+      </div>
+      <form class="modal-new" data-form="save-new"><input name="name" placeholder="Nova playlist" maxlength="80" aria-label="Nome da nova playlist" required><button class="sub-btn rpl">${icon('plus', 16)}Criar</button></form>
+    </div>
+  </div>`);
+  $('.modal input')?.focus({ preventScroll: true });
+}
+
+// ---------- menu "⋯" dos vídeos ----------
+function openMore(btn, v) {
+  const already = $('.pop');
+  closePopups();
+  if (already && already.dataset.for === v.id) return;
+  const r = btn.getBoundingClientRect();
+  const later = isLater(v.id);
+  document.body.insertAdjacentHTML('beforeend', `<div class="pop" role="menu" data-for="${v.id}">
+    <button role="menuitem" data-pop="save">${icon('listPlus', 18)}Salvar em playlist…</button>
+    <button role="menuitem" data-pop="later">${icon('clock', 18)}${later ? 'Tirar de “Assistir mais tarde”' : 'Assistir mais tarde'}</button>
+    <button role="menuitem" data-pop="link">${icon('share', 18)}Copiar link</button>
+    ${v.channelId ? `<hr><button role="menuitem" data-pop="block">${icon('ban', 18)}Não mostrar vídeos de ${esc(v.channel)}</button>` : ''}
+  </div>`);
+  const pop = $('.pop');
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
+  pop.style.top = `${r.bottom + h + 8 > innerHeight ? Math.max(8, r.top - h - 6) : r.bottom + 6}px`;
+  pop.querySelector('button').focus({ preventScroll: true });
+}
+addEventListener('scroll', () => $('.pop')?.remove(), { passive: true });
+
+// ---------- estatísticas ----------
+function statsView() {
+  document.title = 'Suas estatísticas - MeuTube';
+  const s = lib.statsSummary();
+  const max = Math.max(60, ...s.last7.map((d) => d.secs));
+  // Estimativa divertida: ~1,5 anúncio a cada 8 minutos assistidos, ~15 s cada.
+  const ads = Math.round((s.total / 60 / 8) * 1.5);
+  const wd = new Intl.DateTimeFormat('pt-BR', { weekday: 'short' });
+  const card = (ic, label, value, sub = '', count = '') => `<div class="stat-card"><span class="stat-ic">${icon(ic, 20)}</span><span class="meta sm">${label}</span><b ${count !== '' ? `data-count="${count}"` : ''}>${value}</b>${sub ? `<span class="meta xs">${sub}</span>` : ''}</div>`;
+  app.innerHTML = `<section class="view stats">
+    <div class="page-head"><h2>Suas estatísticas</h2><p class="meta">Só neste navegador. Conta o tempo em que o vídeo esteve tocando de verdade.</p></div>
+    <div class="stat-cards">
+      ${card('clock', 'Hoje', longDur(s.today))}
+      ${card('chart', 'Últimos 7 dias', longDur(s.week))}
+      ${card('history', 'No total', longDur(s.total))}
+      ${card('film', 'Vídeos assistidos', s.videos, '', s.videos)}
+      ${card('shield', 'Anúncios evitados', ads, `uns ${longDur(ads * 15)} que você não perdeu`, ads)}
+    </div>
+    <div class="stat-panels">
+      <div class="panel"><h3>Últimos 7 dias</h3>
+        <div class="bars">${s.last7.map((d, i) => `<div class="bar-col"><span class="bar-val">${d.secs ? longDur(d.secs) : ''}</span><div class="bar ${i === 6 ? 'today' : ''}" style="--h:${(d.secs / max) * 100}%;--i:${i}"></div><span class="bar-day">${i === 6 ? 'hoje' : wd.format(d.date).replace('.', '')}</span></div>`).join('')}</div>
+      </div>
+      <div class="panel"><h3>Canais que você mais assiste</h3>
+        ${s.top.length ? s.top.map((c, i) => `<a class="top-ch" href="#/channel/${c.id}" style="--i:${i}">${avatar(c.name, c.avatar, 'md', c.id)}<span class="top-text"><b>${esc(c.name)}</b><span class="meta sm">${longDur(c.secs)}</span><i class="top-bar" style="--w:${(c.secs / s.top[0].secs) * 100}%"></i></span></a>`).join('') : '<p class="meta">Assista a alguns vídeos e seus canais favoritos aparecem aqui.</p>'}
+      </div>
+    </div>
+    <button class="pill rpl" data-stats-reset>${icon('trash', 18)}Zerar estatísticas</button>
+  </section>`;
+  // Números contando até o valor (animação).
+  $$('[data-count]').forEach((el) => {
+    const target = Number(el.dataset.count);
+    if (reduced || !target) return;
+    const t0 = performance.now();
+    const stepFn = (now) => {
+      const p = Math.min(1, (now - t0) / 900);
+      el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) requestAnimationFrame(stepFn);
+    };
+    requestAnimationFrame(stepFn);
+  });
+}
+
+// ---------- ajustes ----------
+function settingsView() {
+  document.title = 'Ajustes - MeuTube';
+  const s = lib.settings();
+  const b = lib.blocked();
+  const sw = (key, on) => `<label class="switch big"><input type="checkbox" data-set="${key}" ${on ? 'checked' : ''}><span class="sr-only">Ligar ou desligar</span></label>`;
+  app.innerHTML = `<section class="view settings">
+    <div class="page-head"><h2>Ajustes</h2><p class="meta">Funções que o YouTube não tem. Tudo fica salvo só neste navegador.</p></div>
+    <div class="set-card" style="--i:0">
+      <div class="set-row"><span class="set-ic">${icon('skipForward', 22)}</span><div><h3>Pular patrocínios automaticamente</h3><p class="meta sm">Usa o SponsorBlock, uma base aberta em que a comunidade marca trechos de patrocínio. O site envia só o código do vídeo. Os trechos também aparecem coloridos na barra do vídeo.</p></div>${sw('sponsor', s.sponsor)}</div>
+      <div class="cats">${Object.entries(SEG_NAMES).map(([k, l]) => `<label class="cat-chip"><input type="checkbox" data-cat="${k}" ${s.sponsorCats.includes(k) ? 'checked' : ''}><span class="seg-dot seg-${k}"></span>${l}</label>`).join('')}</div>
+    </div>
+    <div class="set-card" style="--i:1">
+      <div class="set-row"><span class="set-ic">${icon('dislike', 22)}</span><div><h3>Mostrar “não gostei”</h3><p class="meta sm">O YouTube escondeu esse número. Mostramos a estimativa do Return YouTube Dislike, com uma barrinha de aprovação.</p></div>${sw('dislikes', s.dislikes)}</div>
+    </div>
+    <div class="set-card" style="--i:2">
+      <div class="set-row"><span class="set-ic">${icon('zap', 22)}</span><div><h3>Pré-carregar ao passar o mouse</h3><p class="meta sm">Quando o mouse para numa miniatura, o vídeo já começa a carregar e abre bem mais rápido.</p></div>${sw('prefetch', s.prefetch)}</div>
+    </div>
+    <div class="set-card" style="--i:3">
+      <div class="set-row"><span class="set-ic">${icon('ban', 22)}</span><div><h3>Esconder vídeos</h3><p class="meta sm">Vídeos destes canais ou com estas palavras no título somem do site inteiro.</p></div></div>
+      <form class="inline-form" data-form="word"><input name="w" placeholder="Palavra ou expressão (ex.: spoiler)" maxlength="60" aria-label="Palavra para esconder" required><button class="pill rpl">${icon('plus', 16)}Adicionar</button></form>
+      <div class="tag-wrap">${b.words.map((w) => `<span class="tag-chip">“${esc(w)}”<button data-unword="${esc(w)}" aria-label="Parar de esconder ${esc(w)}">${icon('x', 14)}</button></span>`).join('') || '<span class="meta sm">Nenhuma palavra.</span>'}</div>
+      <h4 class="set-sub">Canais escondidos</h4>
+      <div class="tag-wrap">${b.channels.map((c) => `<span class="tag-chip">${esc(c.name)}<button data-unblock="${c.id}" aria-label="Mostrar ${esc(c.name)} de novo">${icon('x', 14)}</button></span>`).join('') || '<span class="meta sm">Nenhum. Use o menu ⋯ de um vídeo para esconder um canal.</span>'}</div>
+    </div>
+    <div class="set-card" style="--i:4">
+      <div class="set-row"><span class="set-ic">${icon('gear', 22)}</span><div><h3>Atalhos do player</h3>
+        <div class="keys">${[['K', 'pausar'], ['J / L', '±10 s'], ['← / →', '±5 s'], ['↑ / ↓', 'volume'], ['M', 'mudo'], ['F', 'tela cheia'], ['N', 'próximo'], ['S', 'capturar quadro'], ['< / >', 'velocidade']].map(([k, d]) => `<span><kbd>${esc(k)}</kbd>${d}</span>`).join('')}</div>
+      </div></div>
+    </div>
+  </section>`;
+}
+
+// ---------- eventos das funções novas ----------
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!t.closest?.('.pop, [data-more]')) $('.pop')?.remove();
+  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset]');
+  if (!el) return;
+  const vid = () => known.get(location.hash.match(/watch\/([\w-]{11})/)?.[1]) || null;
+
+  if (el.dataset.more) {
+    e.preventDefault();
+    return openMore(el, known.get(el.dataset.more) || { id: el.dataset.more });
+  }
+  if (el.dataset.pop) {
+    const v = known.get($('.pop')?.dataset.for) || {};
+    $('.pop')?.remove();
+    if (el.dataset.pop === 'save') openSaveModal(v);
+    if (el.dataset.pop === 'later') toast(toggleLater(v.id) ? 'Salvo em Assistir mais tarde' : 'Removido de Assistir mais tarde');
+    if (el.dataset.pop === 'link') navigator.clipboard?.writeText(`https://www.youtube.com/watch?v=${v.id}`).then(() => toast('Link copiado'));
+    if (el.dataset.pop === 'block') {
+      lib.blockChannel(v.channelId, v.channel);
+      $$('article[data-vid]').forEach((a) => {
+        if (known.get(a.dataset.vid)?.channelId !== v.channelId) return;
+        a.classList.add('vanish');
+        setTimeout(() => a.remove(), 400);
+      });
+      toast(`Vídeos de ${v.channel} escondidos. Dá para desfazer em Ajustes.`);
+    }
+    return;
+  }
+  if (el.dataset.save) return openSaveModal(known.get(el.dataset.save) || { id: el.dataset.save });
+  if (el.hasAttribute('data-close-modal')) {
+    if (el.classList.contains('modal-back') && t !== el) return; // clique dentro da janela
+    return closePopups();
+  }
+  if (el.hasAttribute('data-mark')) {
+    const v = vid();
+    if (!player || !v) return;
+    const at = Math.round(player.now);
+    const list = lib.addMark(v.id, at);
+    renderMarks(v.id);
+    toast(`Momento ${dur(at) || '0:00'} salvo. Escreva uma nota se quiser.`);
+    $(`[data-mark-note="${list.findIndex((x) => x.t === at)}"]`)?.focus();
+    return;
+  }
+  if (el.dataset.markDel) {
+    const v = vid();
+    if (!v) return;
+    lib.removeMark(v.id, Number(el.dataset.markDel));
+    renderMarks(v.id);
+    return;
+  }
+  if (el.dataset.queue) {
+    const q = queueMode();
+    q[el.dataset.queue] = !q[el.dataset.queue];
+    store.set('queueMode', q);
+    toast(el.dataset.queue === 'loop' ? (q.loop ? 'Playlist vai repetir' : 'Playlist não repete') : (q.shuffle ? 'Ordem aleatória ligada' : 'Ordem normal'));
+    const listId = new URLSearchParams(location.hash.split('?')[1] || '').get('list');
+    const pl = lib.getPlaylist(listId);
+    if (pl) $('#queue').outerHTML = queueHtml(pl, vid()?.id);
+    return;
+  }
+  if (el.dataset.plPlay || el.dataset.plShuffle) {
+    const p = lib.getPlaylist(el.dataset.plPlay || el.dataset.plShuffle);
+    if (!p?.items.length) return;
+    const shuffle = Boolean(el.dataset.plShuffle);
+    store.set('queueMode', { ...queueMode(), shuffle });
+    p.items.forEach((v) => known.set(v.id, { ...known.get(v.id), ...v }));
+    const first = shuffle ? p.items[Math.floor(Math.random() * p.items.length)] : p.items[0];
+    return go(`#/watch/${first.id}?list=${p.id}`);
+  }
+  if (el.dataset.plRename) {
+    const h1 = $('#pl-name');
+    const p = lib.getPlaylist(el.dataset.plRename);
+    if (!h1 || !p) return;
+    h1.outerHTML = `<form class="rename-form" data-form="rename" data-pid="${p.id}"><input name="name" value="${esc(p.name)}" maxlength="80" aria-label="Novo nome" required><button class="sub-btn rpl">Salvar</button></form>`;
+    $('.rename-form input').select();
+    return;
+  }
+  if (el.dataset.plDelete) {
+    const p = lib.getPlaylist(el.dataset.plDelete);
+    if (!p || !confirm(`Apagar a playlist “${p.name}”? Os vídeos continuam no YouTube; só a lista some.`)) return;
+    lib.deletePlaylist(p.id);
+    renderGuide();
+    toast('Playlist apagada');
+    return go('#/playlists');
+  }
+  if (el.dataset.plRemove) {
+    const pid = $('#pl-items')?.dataset.pid;
+    const row = el.closest('.pl-item');
+    row?.classList.add('vanish');
+    setTimeout(() => { lib.removeFromPlaylist(pid, el.dataset.plRemove); refreshPlItems(pid); }, 300);
+    return;
+  }
+  if (el.dataset.plMove) {
+    const pid = $('#pl-items')?.dataset.pid;
+    const [i, d] = el.dataset.plMove.split(':').map(Number);
+    lib.movePlaylistItem(pid, i, i + d);
+    refreshPlItems(pid);
+    $(`[data-pl-move="${i + d}:${d}"]`)?.focus();
+    return;
+  }
+  if (el.dataset.unword) { lib.removeWord(el.dataset.unword); return settingsView(); }
+  if (el.dataset.unblock) { lib.unblockChannel(el.dataset.unblock); return settingsView(); }
+  if (el.hasAttribute('data-stats-reset')) {
+    if (!confirm('Zerar todas as estatísticas de tempo assistido?')) return;
+    lib.resetStats();
+    return statsView();
+  }
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if (el.dataset.set) {
+    lib.setSetting(el.dataset.set, el.checked);
+    toast(el.checked ? 'Ligado' : 'Desligado');
+  }
+  if (el.dataset.cat) {
+    const cats = new Set(lib.settings().sponsorCats);
+    el.checked ? cats.add(el.dataset.cat) : cats.delete(el.dataset.cat);
+    lib.setSetting('sponsorCats', [...cats]);
+  }
+  if (el.dataset.saveLater) {
+    const on = toggleLater(el.dataset.saveLater);
+    if (on !== el.checked) toggleLater(el.dataset.saveLater);
+    toast(el.checked ? 'Salvo em Assistir mais tarde' : 'Removido de Assistir mais tarde');
+  }
+  if (el.dataset.savePl && modalVideo) {
+    const p = lib.getPlaylist(el.dataset.savePl);
+    if (el.checked) lib.addToPlaylist(p.id, modalVideo); else lib.removeFromPlaylist(p.id, modalVideo.id);
+    el.closest('.save-opt').querySelector('.meta').textContent = lib.getPlaylist(p.id).items.length;
+    toast(el.checked ? `Salvo em ${p.name}` : `Removido de ${p.name}`);
+    renderGuide();
+  }
+  if (el.dataset.markNote != null) {
+    const v = known.get(location.hash.match(/watch\/([\w-]{11})/)?.[1]);
+    if (v) { lib.updateMark(v.id, Number(el.dataset.markNote), el.value); player?.setMarks(lib.marks(v.id)); toast('Nota salva'); }
+  }
+});
+
+document.addEventListener('submit', async (e) => {
+  const f = e.target.closest('[data-form]');
+  if (!f) return;
+  e.preventDefault();
+  const val = (n) => (f.elements[n]?.value || '').trim();
+  const kind = f.dataset.form;
+  if (kind === 'new-pl') {
+    const p = lib.createPlaylist(val('name'));
+    renderGuide();
+    toast(`Playlist “${p.name}” criada`);
+    return playlistsView();
+  }
+  if (kind === 'save-new' && modalVideo) {
+    const p = lib.createPlaylist(val('name'), [modalVideo]);
+    renderGuide();
+    closePopups();
+    return toast(`Salvo em ${p.name}`);
+  }
+  if (kind === 'rename') {
+    lib.renamePlaylist(f.dataset.pid, val('name'));
+    renderGuide();
+    return playlistView(f.dataset.pid);
+  }
+  if (kind === 'word') {
+    lib.addWord(val('w'));
+    toast('Vídeos com essa palavra vão sumir do site');
+    return settingsView();
+  }
+  if (kind === 'import-pl') {
+    const btn = f.querySelector('button');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="btn-spin dark"></span>Importando…';
+    try {
+      const r = await api('/api/ytplaylist?list=' + encodeURIComponent(val('list')));
+      const p = lib.createPlaylist(r.title, r.items);
+      renderGuide();
+      toast(`Importada: ${p.name} (${p.items.length} vídeos)`);
+      go(`#/playlist/${p.id}`);
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+      btn.textContent = 'Importar';
+    }
+  }
+});
+
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePopups(); });
+
+// Pré-carga: parar o mouse numa miniatura já começa a buscar o vídeo (abre muito mais rápido).
+const prefetched = new Set();
+let hoverTimer;
+const warm = (id) => {
+  if (prefetched.has(id) || !lib.settings().prefetch) return;
+  prefetched.add(id);
+  fetch('/api/prefetch?id=' + id).catch(() => {});
+  new Image().src = `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`;
+};
+document.addEventListener('pointerover', (e) => {
+  const a = e.target.closest?.('article[data-vid], .q-item, .pl-item');
+  clearTimeout(hoverTimer);
+  const id = a?.dataset.vid || a?.querySelector('a[href*="/watch/"]')?.getAttribute('href').match(/watch\/([\w-]{11})/)?.[1];
+  if (id) hoverTimer = setTimeout(() => warm(id), 450); // só quando o mouse realmente para (menos pedidos)
+}, { passive: true });
+document.addEventListener('touchstart', (e) => {
+  const id = e.target.closest?.('article[data-vid]')?.dataset.vid;
+  if (id) warm(id);
+}, { passive: true });
+
+// ---------- conta ----------
+const BROWSER_NAMES = { firefox: 'Firefox', chrome: 'Chrome', edge: 'Edge', brave: 'Brave', opera: 'Opera', vivaldi: 'Vivaldi', chromium: 'Chromium' };
+let pickedBrowser = 'firefox';
+
+function accountView() {
+  document.title = 'Conta - MeuTube';
+  const c = account.connected;
+  app.innerHTML = `<section class="view account">
+    <div class="acc-card ${c ? 'is-on' : ''}">
+      <div class="acc-badge">
+        ${logoMark()}
+        <span class="acc-key">${icon(c ? 'check' : 'key', 18)}</span>
+      </div>
+      <h1>${c ? 'Conta do YouTube conectada' : 'Conecte sua conta do YouTube'}</h1>
+      <p class="acc-lead">${c
+        ? `${account.mode === 'google' ? 'Conectada com a <strong>sua conta Google</strong>' : account.mode === 'file' ? 'Conectada pelo <strong>arquivo de login</strong>' : `Conectada pelo <strong>${BROWSER_NAMES[account.browser] || account.browser}</strong>`}${account.profile ? ` (perfil ${esc(account.profile)})` : ''}. Suas recomendações, inscrições, histórico, “assistir mais tarde” e curtidos já aparecem aqui, sem anúncios.`
+        : 'Traga suas recomendações, inscrições, histórico, “assistir mais tarde” e vídeos curtidos. De quebra, o YouTube para de pedir a verificação anti-robô.'}</p>
+      ${c ? `
+        <div class="acc-links">
+          <a class="pill rpl" href="#/">${icon('sparkles', 18)}Para você</a>
+          <a class="pill rpl" href="#/subs">${icon('subs', 18)}Inscrições</a>
+          <a class="pill rpl" href="#/liked">${icon('heart', 18)}Curtidos</a>
+          <a class="pill rpl" href="#/history">${icon('history', 18)}Histórico</a>
+        </div>
+        <button class="pill rpl acc-out" data-disconnect>${icon('logout', 18)}Desconectar</button>`
+      : accMethod() === 'google' ? googleMethod() : accMethod() === 'file' ? fileMethod() : `${methodSwitch()}
+        <ol class="acc-steps">
+          <li><span>1</span><div>Abra o <strong>youtube.com</strong> no navegador e entre na sua conta (se ainda não estiver).</div></li>
+          <li><span>2</span><div><strong>Feche esse navegador por completo</strong> (Brave, Chrome e Edge travam o login enquanto estão abertos; o Firefox não precisa).</div></li>
+          <li><span>3</span><div>Escolha o navegador abaixo e clique em <strong>Conectar</strong>.</div></li>
+        </ol>
+        <div class="browser-grid" role="radiogroup" aria-label="Navegador">
+          ${(account.browsers?.length ? account.browsers : Object.keys(BROWSER_NAMES)).map((b) => `<button class="browser rpl ${b === pickedBrowser ? 'on' : ''}" role="radio" aria-checked="${b === pickedBrowser}" data-browser="${b}"><span class="b-dot b-${b}"></span>${BROWSER_NAMES[b] || b}${b === 'firefox' ? '<em>recomendado</em>' : ''}</button>`).join('')}
+        </div>
+        <details class="acc-adv"><summary>Usa mais de um perfil nesse navegador?</summary>
+          <label for="acc-profile">Nome da pasta do perfil (deixe vazio para o perfil principal)</label>
+          <input id="acc-profile" placeholder="ex.: Profile 1" autocomplete="off">
+        </details>
+        <button class="sub-btn connect rpl" data-connect>Conectar</button>
+        <div id="acc-msg" aria-live="polite"></div>`}
+      <p class="acc-note">${icon('shield', 18)}<span>O site nunca pede nem guarda sua senha. Ele usa o login que já existe no seu navegador e guarda só os cookies do YouTube, neste computador (arquivo <code>cookies.txt</code> na pasta do site). Não compartilhe esse arquivo: ele dá acesso à sua conta. Para cortar o acesso a qualquer momento, clique em Desconectar ou saia da conta no YouTube.</span></p>
+    </div>
+  </section>`;
+  // Se um login com Google já estava em andamento (ex.: a página recarregou), retoma o acompanhamento.
+  if (!c && accMethod() === 'google') pollGoogle();
+}
+
+// Três jeitos de conectar: entrar com Google numa janela isolada (principal), arquivo de login ou direto do Firefox.
+const accMethod = () => store.get('accMethod2', 'google');
+const methodSwitch = () => {
+  const cur = accMethod();
+  return `<div class="seg acc-methods" role="tablist">${[['google', 'Entrar com Google'], ['file', 'Arquivo de login'], ['browser', 'Firefox']].map(([v, l]) => `<button class="seg-btn rpl ${cur === v ? 'on' : ''}" role="tab" aria-selected="${cur === v}" data-method="${v}">${l}</button>`).join('')}</div>`;
+};
+// ---------- "Entrar com Google" ----------
+const GOOGLE_G = `<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>`;
+let googleState = { status: 'idle' };
+let googlePoll = null;
+
+function googleMethod() {
+  const s = googleState;
+  const b = s.browser || account.loginBrowser || 'navegador';
+  let body;
+  if (s.status === 'waiting') {
+    body = `<div class="g-live">
+        <div class="g-window"><span class="g-dots"><i></i><i></i><i></i></span>${GOOGLE_G}<b>Janela do ${esc(b)} aberta</b></div>
+        <ol class="acc-steps g-steps">
+          <li><span>1</span><div>Na janela que abriu, <strong>entre na sua conta Google</strong> (é a página oficial do Google).</div></li>
+          <li><span>2</span><div>Espere o <strong>YouTube aparecer com a sua foto</strong> no canto.</div></li>
+          <li><span>3</span><div><strong>Feche a janela</strong> ou clique em “Já entrei”.</div></li>
+        </ol>
+        <div class="blocked-actions">
+          <button class="sub-btn rpl" data-google-done>${icon('check', 16)}Já entrei</button>
+          <button class="pill rpl" data-google-cancel>Cancelar</button>
+        </div>
+      </div>`;
+  } else if (s.status === 'saving') {
+    body = `<div class="g-live"><span class="g-saving"><span class="btn-spin"></span></span><b>Salvando seu login…</b><span class="meta sm">Isso leva só alguns segundos.</span></div>`;
+  } else {
+    body = `<button class="google-btn rpl" data-google-start>${GOOGLE_G}<span>Entrar com Google</span></button>
+      <p class="acc-hint">Abre uma janela do <strong>${esc(b)}</strong> só para o login. Você entra na página oficial do Google, como sempre; o site nunca vê sua senha e funciona com o ${esc(b)} aberto.</p>
+      ${s.status === 'error' ? failure(new Error(s.error || 'Não deu certo.')) : ''}`;
+  }
+  return `${methodSwitch()}<div id="g-box">${body}</div>`;
+}
+
+function renderGoogle() {
+  if (location.hash !== '#/account' || account.connected) return;
+  const box = $('#g-box');
+  if (box && accMethod() === 'google') box.outerHTML = googleMethod().replace(methodSwitch(), '');
+}
+
+async function pollGoogle() {
+  clearTimeout(googlePoll);
+  try { googleState = await (await fetch('/api/account/google')).json(); } catch {}
+  if (googleState.status === 'done') {
+    googleState = { status: 'idle' };
+    return connected('Conta Google conectada');
+  }
+  renderGoogle();
+  if (['waiting', 'saving'].includes(googleState.status)) googlePoll = setTimeout(pollGoogle, 1000);
+}
+
+const fileMethod = () => `${methodSwitch()}
+  <p class="acc-hint">Para <strong>Brave, Chrome, Edge</strong> e outros. Funciona com o navegador aberto.</p>
+  <ol class="acc-steps">
+    <li><span>1</span><div>Instale a extensão <a href="https://chromewebstore.google.com/search/Get%20cookies.txt%20LOCALLY" target="_blank" rel="noopener noreferrer"><strong>Get cookies.txt LOCALLY</strong></a> (gratuita e de código aberto; no Brave ela vem da mesma loja do Chrome).</div></li>
+    <li><span>2</span><div>Abra o <strong>youtube.com</strong>, entre na sua conta, clique no ícone da extensão e depois em <strong>Export</strong>.</div></li>
+    <li><span>3</span><div>Arraste aqui o arquivo que foi baixado.</div></li>
+  </ol>
+  <label class="drop" id="drop" tabindex="0">
+    <input type="file" id="cookie-file" accept=".txt,text/plain" hidden>
+    <span class="drop-ic">${icon('download', 26)}</span>
+    <strong>Arraste o arquivo aqui</strong>
+    <span class="meta sm">ou clique para escolher o arquivo .txt</span>
+  </label>
+  <div id="acc-msg" aria-live="polite"></div>`;
+
+async function connected(msg) {
+  await loadAccount();
+  store.set('chip', 'Para você');
+  toast(msg);
+  accountView();
+  $('.acc-card')?.classList.add('celebrate');
+  burst($('.acc-key'), 28);
+}
+
+async function uploadCookies(file) {
+  const drop = $('#drop');
+  const msg = $('#acc-msg');
+  if (!file || !drop) return;
+  if (file.size > 3e6) { msg.innerHTML = failure(new Error('Esse arquivo é grande demais para ser um arquivo de login.')); return; }
+  drop.classList.add('busy');
+  drop.querySelector('strong').textContent = 'Conectando…';
+  msg.innerHTML = '';
+  try {
+    await send('/api/account/cookies', { text: await file.text() });
+    await connected('Conta do YouTube conectada');
+  } catch (e) {
+    drop.classList.remove('busy');
+    drop.querySelector('strong').textContent = 'Arraste o arquivo aqui';
+    msg.innerHTML = failure(e);
+  }
+}
+
+// Arrastar e soltar o arquivo de login (os eventos ficam no document porque a tela é redesenhada).
+document.addEventListener('change', (e) => { if (e.target.id === 'cookie-file') uploadCookies(e.target.files[0]); });
+document.addEventListener('dragover', (e) => {
+  const d = e.target.closest?.('#drop');
+  if (!d) return;
+  e.preventDefault();
+  d.classList.add('over');
+});
+document.addEventListener('dragleave', (e) => e.target.closest?.('#drop')?.classList.remove('over'));
+document.addEventListener('drop', (e) => {
+  const d = e.target.closest?.('#drop');
+  if (!d) return;
+  e.preventDefault();
+  d.classList.remove('over');
+  uploadCookies(e.dataTransfer.files[0]);
+});
+document.addEventListener('keydown', (e) => { if (e.target.id === 'drop' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('#cookie-file').click(); } });
+
+async function connectAccount(btn) {
+  const msg = $('#acc-msg');
+  btn.disabled = true;
+  btn.classList.add('busy');
+  btn.innerHTML = '<span class="btn-spin"></span>Conectando…';
+  msg.innerHTML = '';
+  try {
+    await send('/api/account', { browser: pickedBrowser, profile: $('#acc-profile')?.value || '' });
+    await connected('Conta do YouTube conectada');
+  } catch (e) {
+    msg.innerHTML = failure(e);
+    btn.disabled = false;
+    btn.classList.remove('busy');
+    btn.textContent = 'Tentar de novo';
+  }
+}
+
+// ---------- downloads ----------
+const DL_LABELS = { 2160: '4K', 1440: '2K', 1080: 'Full HD', 720: 'HD', 480: 'Qualidade padrão', 360: 'Arquivo leve' };
+const downloads = new Map();
+
+function downloadMenu(info) {
+  const heights = info.downloads?.length ? info.downloads : info.qualities.map((q) => q.height);
+  return `<div class="dl-wrap">
+    <button class="pill rpl" data-dl-toggle aria-expanded="false" aria-haspopup="menu">${icon('download', 20)}Baixar</button>
+    <div class="dl-menu" role="menu" hidden>
+      <div class="dl-sec">${icon('video', 18)}Vídeo · MP4</div>
+      ${heights.map((h) => `<button class="dl-item" role="menuitem" data-dl="mp4" data-h="${h}"><span class="dl-q">${h}p${h >= 1080 ? `<b class="hd">${h >= 1440 ? '2K' : 'HD'}</b>` : ''}</span><span class="dl-hint">${DL_LABELS[h] || ''}</span></button>`).join('')}
+      <div class="dl-sec">${icon('music', 18)}Áudio · MP3</div>
+      <button class="dl-item" role="menuitem" data-dl="mp3"><span class="dl-q">MP3</span><span class="dl-hint">Melhor qualidade, com capa</span></button>
+    </div>
+  </div>`;
+}
+
+function closeDlMenus(except) {
+  $$('.dl-menu').forEach((m) => {
+    if (m === except) return;
+    m.hidden = true;
+    m.previousElementSibling?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+async function startDownload(id, kind, height) {
+  const v = known.get(id) || { id, title: 'Vídeo' };
+  try {
+    const job = await send('/api/download', { id, kind, height });
+    downloads.set(job.id, { ...job, title: v.title, thumb: thumbUrl(v) });
+    renderDock();
+    pollDownload(job.id);
+    toast(kind === 'mp3' ? 'Baixando o MP3…' : `Baixando o vídeo em ${height}p…`);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function pollDownload(jobId) {
+  const d = downloads.get(jobId);
+  if (!d || ['done', 'error', 'canceled'].includes(d.status)) return;
+  try {
+    const r = await fetch('/api/download/' + jobId);
+    if (r.ok) Object.assign(d, await r.json());
+  } catch {}
+  renderDock();
+  if (d.status === 'done') {
+    const a = document.createElement('a');
+    a.href = `/api/download/${jobId}/file`;
+    a.download = d.name || '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast('Download concluído');
+    setTimeout(() => dismissDownload(jobId), 9000);
+    return;
+  }
+  if (d.status === 'error') return;
+  setTimeout(() => pollDownload(jobId), 700);
+}
+
+function dismissDownload(jobId) {
+  const el = document.getElementById('dl-' + jobId);
+  if (!el) { downloads.delete(jobId); return; }
+  el.classList.add('leaving');
+  setTimeout(() => { downloads.delete(jobId); renderDock(); }, 350);
+}
+
+const fmtSize = (b) => (b > 1e9 ? `${(b / 1e9).toFixed(1).replace('.', ',')} GB` : `${Math.max(0.1, b / 1e6).toFixed(1).replace('.', ',')} MB`);
+function renderDock() {
+  const dock = $('#dock');
+  for (const [jobId, d] of downloads) {
+    let el = document.getElementById('dl-' + jobId);
+    if (!el) {
+      dock.insertAdjacentHTML('beforeend', `<div class="dl-card" id="dl-${jobId}">
+        <div class="dl-thumb"><img src="${esc(d.thumb)}" alt=""><span class="dl-kind">${d.kind === 'mp3' ? 'MP3' : `${d.height}p`}</span></div>
+        <div class="dl-info"><strong>${esc(d.title)}</strong><span class="dl-status"></span><div class="dl-bar"><i></i></div></div>
+        <button class="icon-btn dl-x" data-dl-cancel="${jobId}" aria-label="Cancelar ou fechar">${icon('x', 18)}</button>
+      </div>`);
+      el = document.getElementById('dl-' + jobId);
+    }
+    el.dataset.state = d.status;
+    const pct = Math.round(d.percent || 0);
+    el.querySelector('.dl-bar i').style.width = `${d.status === 'error' ? 100 : pct}%`;
+    el.querySelector('.dl-status').innerHTML = {
+      starting: 'Preparando…',
+      downloading: dot(`${pct}%`, d.speed, d.eta ? `faltam ${d.eta}` : ''),
+      processing: d.kind === 'mp3' ? 'Convertendo para MP3…' : 'Juntando vídeo e áudio…',
+      done: `${icon('check', 14)} Pronto · ${fmtSize(d.size || 0)} · <a href="/api/download/${jobId}/file" download>salvar de novo</a>`,
+      error: esc(d.error || 'Falhou'),
+      canceled: 'Cancelado',
+    }[d.status] || '';
+  }
+  $$('.dl-card', dock).forEach((el) => { if (!downloads.has(el.id.slice(3))) el.remove(); });
+}
+
+// ---------- animações ----------
+// Confete saindo de um elemento (inscrever-se, conta conectada).
+function burst(el, n = 18) {
+  if (!el || reduced) return;
+  const r = el.getBoundingClientRect();
+  const colors = ['#2f8cff', '#38c6ff', '#8ef0ff', '#ffd166', '#5eead4'];
+  for (let i = 0; i < n; i++) {
+    const s = document.createElement('i');
+    const a = (Math.PI * 2 * i) / n + Math.random() * 0.5;
+    const d = 46 + Math.random() * 46;
+    s.className = 'confetti';
+    s.style.cssText = `left:${r.left + r.width / 2}px;top:${r.top + r.height / 2}px;background:${colors[i % colors.length]};--x:${Math.cos(a) * d}px;--y:${Math.sin(a) * d - 24}px;--r:${Math.random() * 540 - 270}deg`;
+    document.body.appendChild(s);
+    setTimeout(() => s.remove(), 900);
+  }
+}
+
+// Indicador em degradê que desliza até o chip ativo.
+function moveChipInd() {
+  $$('.chips.has-ind').forEach((bar) => {
+    const ind = bar.querySelector('.chip-ind');
+    const on = bar.querySelector('.chip.on');
+    if (!ind || !on) return;
+    ind.style.width = `${on.offsetWidth}px`;
+    ind.style.transform = `translateX(${on.offsetLeft}px)`;
+    if (bar.scrollWidth > bar.clientWidth) on.scrollIntoView({ block: 'nearest', inline: 'center', behavior: reduced ? 'auto' : 'smooth' });
+  });
+}
+
+// Revelação ao rolar: cada card entra quando aparece na tela, em cascata.
+const io = 'IntersectionObserver' in window && !reduced ? new IntersectionObserver((entries) => {
+  let n = 0;
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    e.target.style.setProperty('--d', `${Math.min(n++, 10) * 55}ms`);
+    e.target.classList.add('in');
+    io.unobserve(e.target);
+  }
+}, { rootMargin: '0px 0px -6% 0px', threshold: 0.06 }) : null;
+function reveal() {
+  if (!io) return;
+  $$('.card:not(.sk):not([data-rv]), .row-card:not(.sk):not([data-rv]), .compact:not(.sk):not([data-rv])').forEach((el) => {
+    el.dataset.rv = '1';
+    el.classList.add('rv');
+    io.observe(el);
+  });
+}
+
+// Fotos dos canais: troca as iniciais pelas fotos reais assim que o servidor as encontra.
+const avatarCache = new Map();
+let hydrateTimer;
+function hydrateAvatars() {
+  clearTimeout(hydrateTimer);
+  hydrateTimer = setTimeout(async () => {
+    const spans = $$('span.avatar[data-cid]');
+    if (!spans.length) return;
+    const need = [...new Set(spans.map((s) => s.dataset.cid))].filter((id) => !avatarCache.has(id)).slice(0, 60);
+    if (need.length) {
+      need.forEach((id) => avatarCache.set(id, null));
+      try {
+        const r = await (await fetch('/api/avatars?ids=' + need.join(','))).json();
+        need.forEach((id) => avatarCache.set(id, r[id] || ''));
+      } catch {
+        need.forEach((id) => avatarCache.delete(id));
+      }
+    }
+    $$('span.avatar[data-cid]').forEach((s) => {
+      const url = avatarCache.get(s.dataset.cid);
+      if (!url) return;
+      const img = new Image();
+      img.className = `${s.className} av-in`;
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => { if (s.isConnected) s.replaceWith(img); };
+      img.src = url;
+    });
+    for (const v of known.values()) if (!v.avatar && avatarCache.get(v.channelId)) v.avatar = avatarCache.get(v.channelId);
+  }, 80);
+}
+// Cada "Carregando…" de limite tenta a tela de novo sozinho, esperando um pouco mais a cada vez.
+function armBlocked() {
+  if (!document.querySelector('[data-blocked]')) retryCount.delete(location.hash); // carregou: zera a espera
+  $$('[data-blocked]:not([data-armed])').forEach((el) => {
+    el.dataset.armed = '1';
+    const t = token;
+    const key = location.hash;
+    const n = retryCount.get(key) || 0;
+    retryCount.set(key, n + 1);
+    const secs = RETRY_STEPS[Math.min(n, RETRY_STEPS.length - 1)];
+    setTimeout(() => { if (el.isConnected && t === token) { apiCache.clear(); route(); } }, secs * 1000);
+  });
+}
+new MutationObserver(() => { reveal(); hydrateAvatars(); armBlocked(); }).observe(document.body, { childList: true, subtree: true });
+
+// Miniaturas inclinam em 3D e ganham um brilho que segue o mouse.
+if (matchMedia('(pointer: fine)').matches && !reduced) {
+  let tilted = null;
+  document.addEventListener('pointermove', (e) => {
+    const t = e.target.closest?.('.card .thumb-wrap, .row-card .thumb-wrap');
+    if (tilted && tilted !== t) { tilted.style.transform = ''; tilted.classList.remove('tilt'); }
+    tilted = t;
+    if (!t) return;
+    const r = t.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width;
+    const y = (e.clientY - r.top) / r.height;
+    t.classList.add('tilt');
+    t.style.setProperty('--mx', `${x * 100}%`);
+    t.style.setProperty('--my', `${y * 100}%`);
+    t.style.transform = `perspective(900px) rotateX(${(0.5 - y) * 7}deg) rotateY(${(x - 0.5) * 9}deg) translateY(-6px)`;
+  }, { passive: true });
+  document.addEventListener('pointerdown', () => { if (document.querySelector('.thumb-wrap.tilt')) $$('.thumb-wrap.tilt').forEach((t) => { t.style.transform = ''; t.classList.remove('tilt'); }); });
+}
+
+// Topo ganha vidro ao rolar; botão de voltar ao topo aparece longe do início.
+let scrollTick = false;
+addEventListener('scroll', () => {
+  if (scrollTick) return;
+  scrollTick = true;
+  requestAnimationFrame(() => {
+    body.classList.toggle('scrolled', scrollY > 8);
+    body.classList.toggle('far', scrollY > 900);
+    scrollTick = false;
+  });
+}, { passive: true });
+$('#to-top').addEventListener('click', () => window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' }));
+
+// ---------- efeito de toque (ripple) ----------
+document.addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('.rpl');
+  if (!el || reduced) return;
+  const r = el.getBoundingClientRect();
+  const size = Math.max(r.width, r.height) * 2;
+  const s = document.createElement('span');
+  s.className = 'ripple';
+  s.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size / 2}px;top:${e.clientY - r.top - size / 2}px`;
+  el.appendChild(s);
+  const done = () => { s.classList.add('out'); setTimeout(() => s.remove(), 400); };
+  el.addEventListener('pointerup', done, { once: true });
+  el.addEventListener('pointerleave', done, { once: true });
+});
+
+// ---------- eventos ----------
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.dl-wrap')) closeDlMenus();
+  const el = e.target.closest('[data-later], [data-sub], [data-chip], [data-filter], [data-seek], [data-clear], [data-share], [data-menu], [data-scrim], [data-dl-toggle], [data-dl], [data-dl-cancel], [data-src], [data-browser], [data-connect], [data-disconnect], [data-retry-now], [data-method], [data-google-start], [data-google-done], [data-google-cancel], #desc, a[href^="#/"]');
+  if (!el) return;
+
+  if (el.hasAttribute('data-dl-toggle')) {
+    const menu = el.nextElementSibling;
+    closeDlMenus(menu);
+    menu.hidden = !menu.hidden;
+    el.setAttribute('aria-expanded', String(!menu.hidden));
+    if (!menu.hidden) menu.querySelector('button')?.focus({ preventScroll: true });
+    return;
+  }
+  if (el.dataset.dl) {
+    closeDlMenus();
+    const id = location.hash.match(/watch\/([\w-]{11})/)?.[1];
+    if (id) startDownload(id, el.dataset.dl, Number(el.dataset.h) || 1080);
+    return;
+  }
+  if (el.dataset.dlCancel) {
+    const d = downloads.get(el.dataset.dlCancel);
+    if (d && !['done', 'error', 'canceled'].includes(d.status)) {
+      d.status = 'canceled';
+      send('/api/download/' + el.dataset.dlCancel, null, 'DELETE').catch(() => {});
+      renderDock();
+    }
+    dismissDownload(el.dataset.dlCancel);
+    return;
+  }
+  if (el.dataset.src) {
+    const [key, v] = el.dataset.src.split(':');
+    store.set('src:' + key, v);
+    return route();
+  }
+  if (el.hasAttribute('data-retry-now')) return route();
+  if (el.hasAttribute('data-google-start')) {
+    googleState = { status: 'waiting', browser: account.loginBrowser };
+    renderGoogle();
+    send('/api/account/google').then((s) => { googleState = s; renderGoogle(); pollGoogle(); }).catch((err) => { googleState = { status: 'error', error: err.message }; renderGoogle(); });
+    return;
+  }
+  if (el.hasAttribute('data-google-done')) {
+    send('/api/account/google/done').then(pollGoogle).catch(() => {});
+    googleState = { ...googleState, status: 'saving' };
+    return renderGoogle();
+  }
+  if (el.hasAttribute('data-google-cancel')) {
+    clearTimeout(googlePoll);
+    send('/api/account/google', null, 'DELETE').catch(() => {});
+    googleState = { status: 'idle' };
+    return renderGoogle();
+  }
+  if (el.dataset.method) {
+    store.set('accMethod2', el.dataset.method);
+    return accountView();
+  }
+  if (el.dataset.browser) {
+    pickedBrowser = el.dataset.browser;
+    $$('[data-browser]').forEach((b) => { const on = b.dataset.browser === pickedBrowser; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
+    return;
+  }
+  if (el.hasAttribute('data-connect')) return connectAccount(el);
+  if (el.hasAttribute('data-disconnect')) {
+    send('/api/account', null, 'DELETE').then(async () => { await loadAccount(); toast('Conta desconectada'); accountView(); }).catch((err) => toast(err.message));
+    return;
+  }
+
+  if (el.dataset.later) {
+    e.preventDefault();
+    const on = toggleLater(el.dataset.later);
+    el.classList.toggle('on', on);
+    el.classList.toggle('saved', on);
+    el.setAttribute('aria-pressed', String(on));
+    if (el.classList.contains('pill')) el.innerHTML = icon(on ? 'check' : 'clock', 20) + `<span>${on ? 'Salvo' : 'Mais tarde'}</span>`;
+    else { el.innerHTML = icon(on ? 'check' : 'clock', 18); el.dataset.tip = on ? 'Salvo' : 'Assistir mais tarde'; }
+    el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
+    toast(on ? 'Salvo em Assistir mais tarde' : 'Removido de Assistir mais tarde');
+    if (location.hash === '#/later' && !on) el.closest('.row-card')?.remove();
+    return;
+  }
+  if (el.dataset.sub) {
+    const on = toggleSub(el.dataset.sub, el.dataset.name, el.dataset.avatar);
+    toast(on ? `Inscrição em ${el.dataset.name} adicionada` : 'Inscrição cancelada');
+    if (location.hash === '#/subs') return route();
+    const c = { id: el.dataset.sub, name: el.dataset.name, avatar: el.dataset.avatar };
+    $$(`[data-sub="${c.id}"].sub-btn`).forEach((b) => {
+      const lg = b.classList.contains('lg') ? 'lg' : '';
+      b.outerHTML = subButton(c, `${lg} ${on ? 'just' : ''}`);
+    });
+    if (on) burst($(`[data-sub="${c.id}"].sub-btn`));
+    return;
+  }
+  if (el.dataset.chip) return loadChip(el.dataset.chip, token);
+  if (el.dataset.filter) return renderResults(el.dataset.filter);
+  if (el.dataset.seek) {
+    if (player) { player.seek(Number(el.dataset.seek)); player.play(); window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' }); }
+    return;
+  }
+  if (el.dataset.share) {
+    const url = `https://www.youtube.com/watch?v=${el.dataset.share}`;
+    navigator.clipboard?.writeText(url).then(() => toast('Link copiado'), () => toast(url));
+    return;
+  }
+  if (el.hasAttribute('data-clear')) {
+    store.set('history', []);
+    store.set('progress', {});
+    toast('Histórico limpo');
+    return route();
+  }
+  if (el.hasAttribute('data-menu')) return toggleGuide();
+  if (el.hasAttribute('data-scrim')) return body.classList.remove('drawer-open');
+  if (el.id === 'desc') {
+    if (e.target.closest('a, .ts')) return;
+    const open = !el.classList.contains('open');
+    if (!open && !e.target.closest('.d-less')) return;
+    el.classList.toggle('open', open);
+    el.setAttribute('aria-expanded', String(open));
+    return;
+  }
+  if (el.tagName === 'A') {
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    const from = el.hasAttribute('data-watch') ? el.closest('article')?.querySelector('.thumb') : null;
+    go(el.getAttribute('href'), from);
+  }
+});
+
+$('#search').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const term = $('#q').value.trim();
+  if (term) { $('#q').blur(); go('#/search/' + encodeURIComponent(term)); }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { body.classList.remove('drawer-open'); closeDlMenus(); }
+  if (e.key === '/' && !e.target.closest('input, textarea')) { e.preventDefault(); $('#q').focus(); $('#q').select(); }
+});
+
+addEventListener('resize', () => { layout(); moveChipInd(); });
+addEventListener('popstate', () => { fromPop = true; route(); });
+$('[data-logo]').innerHTML = logo();
+document.fonts?.ready.then(moveChipInd);
+renderGuide();
+loadAccount().then(() => { if (account.connected && /^(#\/?)?$/.test(location.hash)) route(); if (location.hash === '#/account') accountView(); });
+route();
