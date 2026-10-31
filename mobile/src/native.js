@@ -25,6 +25,18 @@ export function installNative() {
   // "Entrar com Google": a página de login abre no Android e volta com o texto do cookies.txt.
   window.meutubeNative = { googleLogin: () => Media.googleLogin().then((r) => r.cookies) };
 
+  // O WebView do Android não tem a Media Session do navegador: sem ela o player nunca contava o que estava tocando e
+  // a notificação/tela de bloqueio não apareciam. Cria uma simples, só para o player preencher (o resto é aqui embaixo).
+  if (!('mediaSession' in navigator)) {
+    const fake = { metadata: null, playbackState: 'none', setActionHandler() {}, setPositionState() {} };
+    Object.defineProperty(Navigator.prototype, 'mediaSession', { configurable: true, get: () => fake });
+  }
+  if (!window.MediaMetadata) {
+    window.MediaMetadata = class MediaMetadata {
+      constructor(m = {}) { Object.assign(this, { title: '', artist: '', album: '', artwork: [] }, m); }
+    };
+  }
+
   const ms = navigator.mediaSession;
   const handlers = {};
   const media = new Set(); // <video> e <audio> que já tocaram (o <audio> do player não fica na página)

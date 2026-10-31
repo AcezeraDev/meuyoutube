@@ -130,8 +130,9 @@ export class Player {
   // Põe a fonte no <video>: arquivo comum direto; live (HLS) pelo hls.js, que escolhe a qualidade sozinho.
   async setSrc(src) {
     if (!this.quality.hls) { this.v.src = src; return; }
-    // Celular (app Android, Safari): o próprio player do aparelho toca HLS, sem baixar o hls.js.
-    if (this.v.canPlayType('application/vnd.apple.mpegurl')) { this.v.src = src; return; }
+    // Celular (app Android, iPhone): o próprio player do aparelho toca HLS, sem baixar o hls.js. No PC é sempre o
+    // hls.js, mesmo com o Chrome novo tocando HLS sozinho: o player dele abre a live borrada e só mostra uma qualidade.
+    if ((window.meutubeApp || !window.MediaSource) && this.v.canPlayType('application/vnd.apple.mpegurl')) { this.v.src = src; return; }
     const Hls = window.MediaSource ? (await import(HLS_JS).catch(() => ({}))).default : null;
     if (this.destroyed) return;
     if (!Hls?.isSupported()) { this.v.src = src; return; } // Safari e celulares tocam HLS sozinhos
