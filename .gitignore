@@ -16,3 +16,6 @@ mobile/www/
 *.jks
 *.keystore
 *.p12
+
+# Registro do servidor ligado com o Windows
+servidor.log
