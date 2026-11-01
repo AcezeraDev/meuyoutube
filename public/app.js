@@ -2291,6 +2291,8 @@ document.addEventListener('click', (e) => {
     closeDlMenus(menu);
     menu.hidden = !menu.hidden;
     el.setAttribute('aria-expanded', String(!menu.hidden));
+    // Abre para a esquerda (alinhado pela direita do botão); se não couber, porque o Baixar caiu no começo da linha, abre para a direita.
+    menu.classList.toggle('to-right', !menu.hidden && el.getBoundingClientRect().right - menu.offsetWidth < 8);
     if (!menu.hidden) menu.querySelector('button')?.focus({ preventScroll: true });
     return;
   }

@@ -208,7 +208,8 @@ body.drawer-open .scrim { opacity: 1; pointer-events: auto; }
 .bottom { display: none; }
 
 /* ---------- área principal ---------- */
-main { min-height: 100vh; outline: none; padding: var(--mh) 0 64px; transition: margin-left 0.35s var(--out); }
+/* clip: o brilho atrás do player (.ambient) passa um pouco das bordas e não pode criar rolagem para o lado. */
+main { min-height: 100vh; outline: none; overflow-x: clip; padding: var(--mh) 0 64px; transition: margin-left 0.35s var(--out); }
 body.docked main { margin-left: var(--guide-w); }
 body.mini main { margin-left: var(--mini-w); }
 .view { padding: 0 24px; max-width: 2200px; margin: 0 auto; }
@@ -396,7 +397,9 @@ button.pill:active, a.pill:active { transform: scale(0.94); }
 body.watching main { margin-left: 0; }
 .watch { display: grid; grid-template-columns: minmax(0, 1fr) 402px; gap: 24px; padding-top: 24px; max-width: 1800px; }
 .w-main { position: relative; min-width: 0; }
-.enter { animation: enter 0.75s var(--soft-spring) both; animation-delay: var(--d, 0ms); }
+/* backwards (não both): terminada a entrada, o bloco fica sem transform/filter; senão o menu Baixar (fixed no celular)
+   passa a se posicionar pelo bloco e não pela tela. */
+.enter { animation: enter 0.75s var(--soft-spring) backwards; animation-delay: var(--d, 0ms); }
 @keyframes enter { from { opacity: 0; transform: translateY(22px); filter: blur(6px); } }
 .ambient { position: absolute; top: -20px; left: -20px; right: -20px; aspect-ratio: 16 / 9; z-index: -1; pointer-events: none; opacity: 0; animation: ambient-in 1.4s 0.2s var(--out) forwards, breathe 7s 1.6s ease-in-out infinite; }
 .ambient img { width: 100%; height: 100%; object-fit: cover; filter: blur(80px) saturate(2.2); transform: scale(1.1); }
@@ -701,6 +704,7 @@ body.has-account .me-dot { transform: scale(1); }
   transform-origin: top right; animation: menu-in 0.35s var(--spring);
 }
 .dl-menu[hidden] { display: none; }
+@media (min-width: 792px) { .dl-menu.to-right { right: auto; left: 0; transform-origin: top left; } }
 .dl-menu > * { animation: rise 0.35s var(--out) both; }
 .dl-menu > *:nth-child(2) { animation-delay: 25ms; }
 .dl-menu > *:nth-child(3) { animation-delay: 50ms; }
@@ -1333,7 +1337,7 @@ html.app .thumb-wrap { will-change: auto; }
 html.app .rv { opacity: 1; transform: none; }
 html.app .rv.in { transition: none; }
 html.app { -webkit-tap-highlight-color: transparent; }
-html.app .enter { animation: rise 0.35s var(--out) both; animation-delay: 0ms; }
+html.app .enter { animation: rise 0.35s var(--out) backwards; animation-delay: 0ms; }
 
 /* =====================================================================
    COMO NO APP DO YOUTUBE: miniplayer de baixo, Meus vídeos, Mim, Shorts
