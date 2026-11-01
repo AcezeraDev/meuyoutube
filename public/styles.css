@@ -1292,6 +1292,8 @@ kbd { min-width: 26px; padding: 3px 7px; border-radius: 7px; background: var(--c
 .rail > .card { scroll-snap-align: start; }
 .live-sec .thumb-wrap { box-shadow: 0 0 0 2px rgba(255, 59, 78, 0.75); border-radius: 14px; }
 .new-badge { position: absolute; left: 8px; top: 8px; padding: 2px 7px; border-radius: 6px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 800; letter-spacing: 0.06em; box-shadow: var(--glow); }
+.members-badge { position: absolute; left: 8px; bottom: 8px; display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 6px; background: #0f9d58; color: #fff; font-size: 11px; font-weight: 800; line-height: 18px; letter-spacing: 0.03em; }
+.compact .members-badge, .pl-thumb .members-badge { left: 4px; bottom: 4px; }
 .g-live { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: #ff3b4e; animation: live-pulse 1.8s ease-out infinite; }
 @media (max-width: 791px) { .rail { grid-auto-columns: 78%; margin: 0 -12px; padding: 2px 12px 12px; } }
 

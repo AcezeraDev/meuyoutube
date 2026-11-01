@@ -158,7 +158,7 @@ function toast(msg) {
 // ---------- dados locais (só neste navegador) ----------
 const known = new Map();
 const remember = (list) => list.forEach((v) => known.set(v.id, { ...known.get(v.id), ...v }));
-const slim = (v) => ({ id: v.id, title: v.title, channel: v.channel, channelId: v.channelId, avatar: v.avatar, verified: v.verified, duration: v.duration, views: v.views, thumb: v.thumb });
+const slim = (v) => ({ id: v.id, title: v.title, channel: v.channel, channelId: v.channelId, avatar: v.avatar, verified: v.verified, duration: v.duration, views: v.views, thumb: v.thumb, members: v.members || undefined });
 
 const later = () => store.get('later', []);
 const subs = () => store.get('subs', []);
@@ -189,6 +189,7 @@ function thumbBlock(v) {
     <a class="thumb" href="#/watch/${v.id}" data-watch tabindex="-1" aria-hidden="true">
       <img loading="lazy" decoding="async" src="${esc(thumbUrl(v))}" alt="" onerror="this.onerror=null;this.src='https://i.ytimg.com/vi/${v.id}/mqdefault.jpg'">
       ${v.live ? `<span class="dur live">${icon('live', 13)}AO VIVO</span>` : v.duration ? `<span class="dur">${dur(v.duration)}</span>` : ''}
+      ${v.members ? `<span class="members-badge">${icon('lock', 12)}Só membros</span>` : ''}
       ${pct ? `<span class="prog"><i style="width:${pct}%"></i></span>` : ''}
     </a>
     <button class="later ${saved ? 'on' : ''}" data-later="${v.id}" aria-pressed="${saved}" aria-label="Assistir mais tarde" data-tip="${saved ? 'Salvo' : 'Assistir mais tarde'}">${icon(saved ? 'check' : 'clock', 18)}</button>

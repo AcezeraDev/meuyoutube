@@ -39,6 +39,32 @@ const JS_RUNTIME = ['--js-runtimes', `node:${process.execPath}`];
 const baseArgs = ({ pt = true, account = config } = {}) => ['--no-warnings', ...JS_RUNTIME, ...cookieArgs(account), ...(pt ? ['--extractor-args', 'youtube:lang=pt'] : [])];
 const ENV = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
 
+// O yt-dlp pode não estar no PATH deste processo ("spawn yt-dlp ENOENT"): o servidor sobe pelo Windows (Inicializar) ou
+// por outro programa. Procura no PATH e nas pastas usuais. Se o pip do app Claude instalou o yt-dlp, o Windows guarda
+// os arquivos dele dentro de Packages\Claude_*\LocalCache, invisível por AppData; ali achamos e apontamos o Python para lá.
+const YTDLP = (() => {
+  const exe = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+  const home = os.homedir();
+  const dirs = (process.env.PATH || process.env.Path || '').split(path.delimiter).filter(Boolean);
+  const pyDirs = (base) => { try { return fs.readdirSync(base).flatMap((v) => [path.join(base, v, 'Scripts'), path.join(base, v)]); } catch { return []; } };
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    dirs.push(...pyDirs(path.join(roaming, 'Python')), ...pyDirs(path.join(local, 'Programs', 'Python')));
+    try {
+      for (const pk of fs.readdirSync(path.join(local, 'Packages')).filter((n) => /^Claude_/.test(n))) dirs.push(...pyDirs(path.join(local, 'Packages', pk, 'LocalCache', 'Roaming', 'Python')));
+    } catch {}
+    dirs.push(path.join(local, 'Microsoft', 'WinGet', 'Links'), path.join(home, 'scoop', 'shims'), 'C:\ProgramData\chocolatey\bin', __dirname);
+  } else dirs.push(path.join(home, '.local', 'bin'), '/usr/local/bin', '/opt/homebrew/bin');
+  for (const d of dirs) { const p = path.join(d, exe); try { if (fs.statSync(p).isFile()) return p; } catch {} }
+  return 'yt-dlp';
+})();
+if (YTDLP !== 'yt-dlp') {
+  ENV.PATH = path.dirname(YTDLP) + path.delimiter + (ENV.PATH || ENV.Path || '');
+  const i = YTDLP.search(/[\\/]Packages[\\/]Claude_/i);
+  if (i >= 0) ENV.PYTHONUSERBASE = path.resolve(path.dirname(YTDLP), '..', '..'); // ...\Roaming\Python (pai de Python311)
+}
+
 function friendly(line, browser) {
   const b = browser ? browser.charAt(0).toUpperCase() + browser.slice(1) : 'navegador';
   if (/dpapi|app.?bound|failed to decrypt/i.test(line)) return `O ${b} protege os cookies com uma criptografia nova que o yt-dlp não consegue ler. Entre no YouTube pelo Firefox e conecte por ele.`;
@@ -74,7 +100,7 @@ const freeSlot = () => { const next = waiting.shift(); if (next) next(); else ru
 function runYtdlp(args, opts) {
   return new Promise((resolve, reject) => {
     const exec = { maxBuffer: 128 * 1024 * 1024, timeout: 90000, windowsHide: true, env: ENV };
-    execFile('yt-dlp', [...baseArgs(opts), ...(opts.extra || []), ...args], exec, (err, stdout, stderr) => {
+    execFile(YTDLP, [...baseArgs(opts), ...(opts.extra || []), ...args], exec, (err, stdout, stderr) => {
       if (!err) return resolve(stdout);
       const text = (stderr || err.message).trim();
       const line = text.split('\n').filter((l) => /ERROR/.test(l)).pop() || text.split('\n').pop();
@@ -233,6 +259,7 @@ const entry = (e, channel = {}) => {
     duration: Math.round(e.duration || 0),
     views: e.view_count || 0,
     live: e.live_status === 'is_live',
+    members: e.availability === 'subscriber_only', // só para membros do canal
     description: (e.description || '').split('\n')[0].slice(0, 200),
     thumb: https(thumb?.url),
   };
@@ -817,7 +844,7 @@ function startDownload(id, kind, height) {
     '--print', 'after_move:F|%(filepath)s',
     `https://www.youtube.com/watch?v=${id}`,
   ];
-  const p = spawn('yt-dlp', args, { windowsHide: true, env: ENV });
+  const p = spawn(YTDLP, args, { windowsHide: true, env: ENV });
   job.proc = p;
   let last = 0;
   let errText = '';

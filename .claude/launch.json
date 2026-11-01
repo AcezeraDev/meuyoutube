@@ -4,15 +4,32 @@
     {
       "name": "meutube",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
+      "runtimeArgs": [
+        "server.js"
+      ],
       "port": 3000
     },
     {
       "name": "meutube-3010",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
-      "env": { "PORT": "3010" },
+      "runtimeArgs": [
+        "server.js"
+      ],
+      "env": {
+        "PORT": "3010"
+      },
       "port": 3010
+    },
+    {
+      "name": "meutube-3020",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "server.js"
+      ],
+      "env": {
+        "PORT": "3020"
+      },
+      "port": 3020
     }
   ]
 }

@@ -5,7 +5,7 @@ import { otherStats } from './sync.js';
 const get = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const set = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const uid = () => Math.random().toString(36).slice(2, 10);
-const slim = (v) => ({ id: v.id, title: v.title, channel: v.channel, channelId: v.channelId, avatar: v.avatar, verified: v.verified, duration: v.duration, views: v.views, thumb: v.thumb });
+const slim = (v) => ({ id: v.id, title: v.title, channel: v.channel, channelId: v.channelId, avatar: v.avatar, verified: v.verified, duration: v.duration, views: v.views, thumb: v.thumb, members: v.members || undefined });
 
 // ---------- playlists ----------
 export const playlists = () => get('playlists', []);
