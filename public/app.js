@@ -1098,6 +1098,7 @@ async function openTranscript() {
 // Markdown simples da resposta: negrito, código, listas e títulos; [4:05] vira um botão que pula para o momento.
 function aiHtml(text) {
   const inline = (s) => esc(s)
+    .replace(/\[([^\]]+)\]\((#\/[^\s)]+|https?:\/\/[^\s)]+)\)/g, (all, label, url) => (url.startsWith('#') ? `<a href="${url}">${label}</a>` : `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`))
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
     .replace(/(^|[^*\w])\*(?!\s)([^*]+?)\*(?!\w)/g, '$1<i>$2</i>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -1120,66 +1121,286 @@ function aiHtml(text) {
   }
   return blocks.map((b) => (typeof b === 'string' ? b : `<${b.tag}>${b.items.map((i) => `<li>${i}</li>`).join('')}</${b.tag}>`)).join('');
 }
-const aiChats = new Map(); // vídeo -> [{ q, a | err }] (enquanto o site estiver aberto)
-let aiView = null; // painel aberto agora: { id, render }
-const AI_SUGGEST = ['Resuma o vídeo', 'Quais são os pontos principais?', 'Qual é a conclusão?', 'Explique de um jeito simples'];
-async function openAi() {
-  const box = $('#w-ai');
-  const btn = $('[data-ai]');
-  if (!box || !player) return;
-  if (box.firstChild) { box.innerHTML = ''; aiView = null; btn?.setAttribute('aria-pressed', 'false'); return; }
-  btn?.setAttribute('aria-pressed', 'true');
-  const id = player.info.id;
-  const chat = aiChats.get(id) || [];
-  aiChats.set(id, chat);
-  box.innerHTML = `<section class="ai-panel" aria-label="Perguntas sobre o vídeo">
-    <div class="tr-head"><h3>${icon('sparkles', 18)}IA <span class="meta xs">Codex · sua conta do ChatGPT</span></h3><button class="icon-btn rpl" data-ai-close aria-label="Fechar a IA">${icon('x', 18)}</button></div>
+// A IA é uma gaveta do site todo: continua aberta enquanto você (ou ela) navega. A conversa fica até recarregar a página.
+const aiChat = []; // [{ q, imgs, frameAt, a | err, status }]
+let aiInfo = null; // { ok, error, models: [{ id, name, efforts }], model, effort } (o que o Codex da sua conta oferece)
+let aiPending = []; // imagens anexadas esperando a próxima pergunta (data URLs)
+let aiBusy = null; // pergunta em andamento (AbortController)
+const EFFORTS = { none: 'Nenhum', minimal: 'Mínimo', low: 'Baixo', medium: 'Médio', high: 'Alto', xhigh: 'Muito alto', max: 'Máximo', ultra: 'Ultra' };
+const AI_SUGGEST_VIDEO = ['Resuma o vídeo', 'O que está acontecendo agora?', 'Quais são os pontos principais?', 'Me recomende vídeos parecidos'];
+const AI_SUGGEST = ['O que tem de novo nas minhas inscrições?', 'Me recomende vídeos de ciência', 'Busque lives de jogos acontecendo agora', 'Abra um vídeo de receita rápida'];
+const aiVideo = () => player || mini; // o vídeo da página ou o do miniplayer
+const aiDrawer = $('#ai-drawer');
+if (window.meutubeApp) $('.ai-top').forEach((b) => b.remove()); // no celular não tem Codex
+
+function aiToggle(open = aiDrawer.hidden) {
+  aiDrawer.hidden = !open;
+  body.classList.toggle('ai-open', open);
+  $$('[data-ai]').forEach((b) => b.setAttribute('aria-pressed', String(open)));
+  if (!open) return;
+  if (!aiDrawer.firstChild) aiBuild();
+  aiRender();
+  aiDrawer.querySelector('textarea').focus({ preventScroll: true });
+  if (!aiInfo?.ok) {
+    fetch('/api/ai').then((r) => r.json()).catch(() => ({ ok: false, error: 'O servidor do MeuTube não respondeu. Ele precisa estar rodando a versão nova (reinicie o servidor).' }))
+      .then((st) => { aiInfo = st; aiBuildOptions(); aiRender(); });
+  }
+}
+
+function aiBuild() {
+  aiDrawer.classList.toggle('wide', store.get('aiWide', false));
+  aiDrawer.innerHTML = `
+    <div class="ai-head">
+      <h3>${icon('sparkles', 18)}IA <span class="meta xs">Codex · sua conta do ChatGPT</span></h3>
+      <button class="icon-btn rpl" data-ai-new title="Nova conversa" aria-label="Nova conversa">${icon('edit', 18)}</button>
+      <button class="icon-btn rpl" data-ai-wide title="Aumentar ou diminuir" aria-label="Aumentar ou diminuir o painel">${icon('maximize', 18)}</button>
+      <button class="icon-btn rpl" data-ai-close title="Fechar" aria-label="Fechar a IA">${icon('x', 18)}</button>
+    </div>
+    <div class="ai-opts">
+      <label><span>Modelo</span><select data-ai-model aria-label="Modelo"></select></label>
+      <label><span>Esforço</span><select data-ai-effort aria-label="Esforço de raciocínio"></select></label>
+    </div>
+    <div class="ai-ctx meta xs"></div>
     <div class="ai-log" aria-live="polite"></div>
-    <form class="ai-form"><textarea rows="1" maxlength="2000" placeholder="Pergunte algo sobre este vídeo…" aria-label="Sua pergunta"></textarea><button class="ai-send rpl" aria-label="Enviar pergunta">${icon('send', 18)}</button></form>
-  </section>`;
-  placePanel(box);
-  const log = box.querySelector('.ai-log');
-  const form = box.querySelector('form');
-  const ta = form.querySelector('textarea');
-  let blocked = '';
-  const render = () => {
-    if (!log.isConnected) return;
-    log.innerHTML = chat.length
-      ? chat.map((m) => `<div class="ai-q">${esc(m.q)}</div>${m.a ? `<div class="ai-a">${aiHtml(m.a)}</div>`
-        : m.err ? `<div class="ai-a ai-err">${icon('alert', 16)}<span>${esc(m.err)}</span></div>`
-          : '<div class="ai-a ai-wait"><span class="ai-dots"><i></i><i></i><i></i></span>Lendo o vídeo e pensando…</div>'}`).join('')
-      : `<div class="ai-empty">
-          <p>Pergunte qualquer coisa sobre este vídeo. A IA lê a transcrição e mostra os momentos para você pular direto para eles.</p>
-          ${blocked ? `<div class="alert">${icon('alert', 20)}<div>${esc(blocked)}</div></div>` : `<div class="ai-chips">${AI_SUGGEST.map((s) => `<button type="button" class="chip" data-ask="${esc(s)}">${esc(s)}</button>`).join('')}</div>`}
-        </div>`;
-    log.scrollTop = log.scrollHeight;
-  };
-  aiView = { id, render };
-  const ask = async (q) => {
-    q = q.trim();
-    if (!q || blocked || chat.some((m) => !m.a && !m.err)) return;
-    const history = chat.filter((m) => m.a).slice(-6).map(({ q: pq, a }) => ({ q: pq, a }));
-    const turn = { q };
-    chat.push(turn);
-    ta.value = '';
-    ta.style.height = '';
-    render();
-    try { turn.a = (await send('/api/ask', { id, q, history })).answer; } catch (e) { turn.err = e.message; }
-    if (aiView?.id === id) aiView.render(); // o painel pode ter sido fechado e aberto de novo enquanto esperava
-  };
-  form.addEventListener('submit', (e) => { e.preventDefault(); ask(ta.value); });
-  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(ta.value); } });
-  ta.addEventListener('input', () => { ta.style.height = ''; ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`; });
-  box.addEventListener('click', (e) => {
-    if (e.target.closest('[data-ai-close]')) { box.innerHTML = ''; aiView = null; btn?.setAttribute('aria-pressed', 'false'); return; }
-    const chip = e.target.closest('[data-ask]');
-    if (chip) ask(chip.dataset.ask);
+    <form class="ai-form">
+      <div class="ai-attach"></div>
+      <div class="ai-tools">
+        <button type="button" class="ai-tool" data-ai-frame title="Manda junto o que está na tela do vídeo agora">${icon('camera', 16)}Tela</button>
+        <label class="ai-tool" title="Anexar imagem (também dá para colar com Ctrl+V ou arrastar)">${icon('image', 16)}Imagem<input type="file" accept="image/*" multiple hidden></label>
+        <span class="ai-hint">${icon('globe', 14)}pesquisa na web e mexe no MeuTube</span>
+      </div>
+      <div class="ai-row">
+        <textarea rows="1" maxlength="4000" placeholder="Pergunte ou peça qualquer coisa…" aria-label="Sua mensagem para a IA"></textarea>
+        <button class="ai-send rpl" aria-label="Enviar">${icon('send', 18)}</button>
+      </div>
+    </form>`;
+  const ta = aiDrawer.querySelector('textarea');
+  const form = aiDrawer.querySelector('form');
+  form.addEventListener('submit', (e) => { e.preventDefault(); aiBusy ? aiBusy.abort() : aiAsk(ta.value); });
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!aiBusy) aiAsk(ta.value); } });
+  ta.addEventListener('input', () => { ta.style.height = ''; ta.style.height = `${Math.min(ta.scrollHeight, 180)}px`; });
+  ta.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+    if (files.length) { e.preventDefault(); aiAttach(files); }
   });
-  render();
-  ta.focus({ preventScroll: true });
-  // Codex instalado e conectado? (só avisa; a pergunta em si também explica o erro, se houver)
-  const st = await fetch('/api/ai').then((r) => r.json()).catch(() => ({ ok: false, error: 'O servidor não respondeu.' }));
-  if (!st.ok && log.isConnected) { blocked = st.error; form.hidden = true; render(); }
+  aiDrawer.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); aiDrawer.classList.add('drop'); } });
+  aiDrawer.addEventListener('dragleave', (e) => { if (!aiDrawer.contains(e.relatedTarget)) aiDrawer.classList.remove('drop'); });
+  aiDrawer.addEventListener('drop', (e) => { e.preventDefault(); aiDrawer.classList.remove('drop'); aiAttach([...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'))); });
+  aiDrawer.querySelector('input[type=file]').addEventListener('change', (e) => { aiAttach([...e.target.files]); e.target.value = ''; });
+  aiDrawer.addEventListener('change', (e) => {
+    if (e.target.matches('[data-ai-model]')) { store.set('aiModel', e.target.value); aiBuildOptions(); }
+    if (e.target.matches('[data-ai-effort]')) store.set('aiEffort', e.target.value);
+  });
+  aiDrawer.addEventListener('click', (e) => {
+    const b = e.target.closest('button, a');
+    if (!b) return;
+    if (b.matches('[data-ai-close]')) return aiToggle(false);
+    if (b.matches('[data-ai-wide]')) { store.set('aiWide', aiDrawer.classList.toggle('wide')); return; }
+    if (b.matches('[data-ai-new]')) { aiBusy?.abort(); aiChat.length = 0; aiPending = []; return aiRender(); }
+    if (b.matches('[data-ai-frame]')) { store.set('aiFrame', !store.get('aiFrame', true)); return aiRender(); }
+    if (b.dataset.aiUnattach) { aiPending.splice(Number(b.dataset.aiUnattach), 1); return aiRender(); }
+    if (b.dataset.ask) return aiAsk(b.dataset.ask);
+    // Na tela estreita a gaveta cobre o site: ao abrir um link de vídeo/página da resposta, ela sai da frente.
+    if (b.matches('a[href^="#/"]') && innerWidth < 1100) aiToggle(false);
+  });
+}
+
+// Modelos e esforços que a sua conta oferece (o padrão é o do seu config.toml do Codex).
+function aiBuildOptions() {
+  const ms = aiDrawer.querySelector('[data-ai-model]');
+  const es = aiDrawer.querySelector('[data-ai-effort]');
+  if (!ms || !aiInfo) return;
+  const models = aiInfo.models || [];
+  const model = models.find((m) => m.id === store.get('aiModel', '')) || models.find((m) => m.id === aiInfo.model) || models[0];
+  ms.innerHTML = models.length ? models.map((m) => `<option value="${esc(m.id)}" ${m === model ? 'selected' : ''}>${esc(m.name)}${m.id === aiInfo.model ? ' (padrão)' : ''}</option>`).join('') : '<option value="">Padrão do Codex</option>';
+  const efforts = model?.efforts?.length ? model.efforts : ['low', 'medium', 'high'];
+  const want = store.get('aiEffort', 'low');
+  const effort = efforts.includes(want) ? want : efforts.includes('low') ? 'low' : efforts[0];
+  es.innerHTML = efforts.map((x) => `<option value="${x}" ${x === effort ? 'selected' : ''}>${EFFORTS[x] || x}${x === 'low' ? ' (mais rápido)' : ''}</option>`).join('');
+}
+
+// Linha do contexto ("Vendo: … · 4:05"): acompanha a navegação e o vídeo sem redesenhar a conversa.
+function aiCtx() {
+  if (aiDrawer.hidden || !aiDrawer.firstChild) return;
+  const v = aiVideo();
+  aiDrawer.querySelector('.ai-ctx').innerHTML = v
+    ? `${icon('video', 14)}<span>Vendo: <b>${esc(v.info.title)}</b>${v.info.live ? ' · ao vivo' : ` · ${dur(v.now) || '0:00'}`}</span>`
+    : `${icon('home', 14)}<span>${esc(document.title.replace(/ - MeuTube$/, '') || 'MeuTube')}</span>`;
+  const fb = aiDrawer.querySelector('[data-ai-frame]');
+  fb.setAttribute('aria-pressed', String(store.get('aiFrame', true)));
+  fb.hidden = !v;
+}
+function aiRender() {
+  if (aiDrawer.hidden || !aiDrawer.firstChild) return;
+  const log = aiDrawer.querySelector('.ai-log');
+  const v = aiVideo();
+  aiCtx();
+  aiDrawer.querySelector('.ai-attach').innerHTML = aiPending.map((src, i) => `<span class="ai-thumb"><img src="${src}" alt=""><button type="button" data-ai-unattach="${i}" aria-label="Tirar imagem">${icon('x', 12)}</button></span>`).join('');
+  const send = aiDrawer.querySelector('.ai-send');
+  send.innerHTML = icon(aiBusy ? 'x' : 'send', 18);
+  send.setAttribute('aria-label', aiBusy ? 'Parar a resposta' : 'Enviar');
+  send.classList.toggle('stop', Boolean(aiBusy));
+  const blocked = aiInfo && !aiInfo.ok ? aiInfo.error : '';
+  log.innerHTML = aiChat.length
+    ? aiChat.map((m) => `<div class="ai-q">${m.imgs?.length ? `<div class="ai-q-imgs">${m.imgs.map((s) => `<img src="${s}" alt="">`).join('')}</div>` : ''}${m.frameAt != null ? `<span class="ai-q-tag">${icon('camera', 12)}tela em ${m.frameAt}</span>` : ''}${esc(m.q)}</div>
+      ${m.a ? `<div class="ai-a">${aiHtml(m.a)}</div>`
+        : m.err ? `<div class="ai-a ai-err">${icon('alert', 16)}<span>${esc(m.err)}</span></div>`
+          : `<div class="ai-a ai-wait"><span class="ai-dots"><i></i><i></i><i></i></span><span>${esc(m.status || 'Pensando…')}</span></div>`}`).join('')
+    : `<div class="ai-empty">
+        <p>Pergunte sobre o vídeo, peça para buscar e abrir vídeos, controlar o player, salvar em playlists ou pesquisar na web. A IA vê a transcrição, os comentários, o chat da live, a tela do vídeo e as imagens que você mandar.</p>
+        ${blocked ? `<div class="alert">${icon('alert', 20)}<div>${esc(blocked)}</div></div>` : `<div class="ai-chips">${(v ? AI_SUGGEST_VIDEO : AI_SUGGEST).map((s) => `<button type="button" class="chip" data-ask="${esc(s)}">${esc(s)}</button>`).join('')}</div>`}
+      </div>`;
+  log.scrollTop = log.scrollHeight;
+}
+setInterval(aiCtx, 2000);
+addEventListener('hashchange', () => setTimeout(() => { aiCtx(); if (!aiChat.length) aiRender(); }, 600));
+
+// Imagens anexadas: diminuídas no navegador (até 1600 px, JPEG) para irem rápido.
+async function aiShrink(file, max = 1600) {
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * s);
+  c.height = Math.round(bmp.height * s);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.86);
+}
+async function aiAttach(files) {
+  for (const f of files.slice(0, 4 - aiPending.length)) { try { aiPending.push(await aiShrink(f)); } catch {} }
+  if (files.length > 4) toast('Até 4 imagens por pergunta');
+  aiRender();
+}
+// O quadro que está na tela agora (o vídeo passa pelo próprio servidor, então o navegador deixa copiar a imagem).
+function aiFrame() {
+  const v = aiVideo();
+  if (!v || v.audioOnly || !v.v.videoWidth) return null;
+  const s = Math.min(1, 1280 / v.v.videoWidth);
+  const c = document.createElement('canvas');
+  c.width = Math.round(v.v.videoWidth * s);
+  c.height = Math.round(v.v.videoHeight * s);
+  try { c.getContext('2d').drawImage(v.v, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', 0.85); } catch { return null; }
+}
+
+async function aiAsk(q) {
+  q = q.trim();
+  if (!q || aiBusy || (aiInfo && !aiInfo.ok)) return;
+  const ta = aiDrawer.querySelector('textarea');
+  const v = aiVideo();
+  const frame = store.get('aiFrame', true) ? aiFrame() : null;
+  const turn = { q, imgs: aiPending, frameAt: frame ? (v.info.live ? 'ao vivo' : dur(v.now) || '0:00') : null, status: '' };
+  const history = aiChat.filter((m) => m.a).slice(-8).map((m) => ({ q: m.q, a: m.a }));
+  aiChat.push(turn);
+  aiPending = [];
+  ta.value = '';
+  ta.style.height = '';
+  aiBusy = new AbortController();
+  aiRender();
+  loading(1);
+  try {
+    const r = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: aiBusy.signal,
+      body: JSON.stringify({
+        q, history, id: v?.info.id || '', at: v && !v.info.live ? v.now : null, frame, images: turn.imgs,
+        page: `${document.title.replace(/ - MeuTube$/, '')} (${location.hash || '#/'})`,
+        model: aiDrawer.querySelector('[data-ai-model]')?.value || '', effort: aiDrawer.querySelector('[data-ai-effort]')?.value || '',
+      }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'O servidor não aceitou a pergunta.');
+    // Resposta em partes: o andamento, as ações no site e, no fim, a resposta.
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === 'status') { turn.status = ev.text; aiRender(); }
+        if (ev.type === 'action') aiDo(ev.action).catch((e) => `Não deu: ${e.message}`).then((result) => send('/api/ai/act-result', { actionId: ev.actionId, result }).catch(() => {}));
+        if (ev.type === 'answer') turn.a = ev.answer;
+        if (ev.type === 'error') turn.err = ev.error;
+      }
+    }
+    if (!turn.a && !turn.err) turn.err = 'A conexão com o servidor caiu antes da resposta.';
+  } catch (e) {
+    turn.err = e.name === 'AbortError' ? 'Você parou a resposta.' : e.message;
+  } finally {
+    loading(-1);
+    aiBusy = null;
+    aiRender();
+  }
+}
+
+// ---------- ações que a IA pede no site ----------
+const AI_PAGES = { inicio: '#/', inscricoes: '#/subs', shorts: '#/shorts', historico: '#/history', assistir_mais_tarde: '#/later', curtidos: '#/liked', playlists: '#/playlists', estatisticas: '#/stats', ajustes: '#/settings', meus_videos: '#/library' };
+const findPlaylist = (name) => lib.playlists().find((p) => p.name.toLowerCase() === String(name || '').trim().toLowerCase());
+const waitFor = async (test, ms = 20000) => { for (let t = 0; t < ms && !test(); t += 250) await new Promise((r) => setTimeout(r, 250)); return test(); };
+async function aiVideoInfo(id) {
+  if (!known.get(id)?.title) { try { known.set(id, { ...known.get(id), ...slim(await api('/api/video?id=' + id)) }); } catch {} }
+  return known.get(id) || { id };
+}
+async function aiDo(a) {
+  if (a.kind === 'open_video') {
+    if (!/^[\w-]{11}$/.test(a.id || '')) return 'Código de vídeo inválido.';
+    go(`#/watch/${a.id}`);
+    if (!(await waitFor(() => player?.info.id === a.id))) return 'Abri a página do vídeo, mas ele ainda está carregando.';
+    if (a.start > 0) { player.seek(a.start); player.play(); }
+    return `Vídeo aberto e tocando${a.start > 0 ? ` a partir de ${dur(a.start)}` : ''}: ${player.info.title}`;
+  }
+  if (a.kind === 'open_page') {
+    let hash = AI_PAGES[a.page];
+    if (a.page === 'busca') hash = a.query ? `#/search/${encodeURIComponent(a.query)}` : '';
+    if (a.page === 'canal') hash = /^UC[\w-]{22}$/.test(a.channelId || '') ? `#/channel/${a.channelId}` : '';
+    if (a.page === 'playlist') { const p = findPlaylist(a.playlist); hash = p ? `#/playlist/${p.id}` : ''; if (!p) return `Não existe playlist chamada "${a.playlist}". Existentes: ${lib.playlists().map((x) => x.name).join(', ') || 'nenhuma'}.`; }
+    if (!hash) return 'Faltou dizer o que abrir.';
+    go(hash);
+    return `Página aberta: ${a.page}${a.query ? ` (${a.query})` : ''}.`;
+  }
+  if (a.kind === 'player') {
+    const p = aiVideo();
+    if (!p) return 'Nenhum vídeo aberto agora.';
+    const n = Number(a.value);
+    const acts = {
+      tocar: () => p.play(), pausar: () => p.pause(),
+      pular_para: () => p.seek(n || 0), avancar: () => p.seek(p.now + (n || 10)), voltar: () => p.seek(p.now - (n || 10)),
+      velocidade: () => p.setRate(Math.min(3, Math.max(0.25, n || 1))),
+      legendas_ligar: () => { if (!p.subKey && p.subs.length) p.toggleSubs(); },
+      legendas_desligar: () => p.setSubs(null),
+      tela_cheia: () => p.fullscreen(),
+      proximo: () => p.opts.onNext?.(),
+    };
+    if (!acts[a.action]) return 'Ação de player desconhecida.';
+    acts[a.action]();
+    if (a.action === 'legendas_ligar' && !p.subs.length) return 'Este vídeo não tem legendas.';
+    return `Feito (${a.action}). O vídeo está em ${dur(p.now) || '0:00'}${p.playing ? ', tocando' : ', pausado'}.`;
+  }
+  if (a.kind === 'save') {
+    if (!/^[\w-]{11}$/.test(a.id || '')) return 'Código de vídeo inválido.';
+    const v = await aiVideoInfo(a.id);
+    if (/^assistir|later/i.test(a.where || '')) { if (!isLater(a.id)) toggleLater(a.id); toast('Salvo em Assistir mais tarde'); return 'Salvo em Assistir mais tarde.'; }
+    const p = findPlaylist(a.where) || lib.createPlaylist(a.where);
+    lib.addToPlaylist(p.id, v);
+    renderGuide();
+    toast(`Salvo em ${p.name}`);
+    return `Salvo na playlist "${p.name}".`;
+  }
+  if (a.kind === 'library') {
+    const short = (v) => ({ id: v.id, titulo: v.title, canal: v.channel });
+    return {
+      playlists: lib.playlists().map((p) => ({ nome: p.name, videos: p.items.slice(0, 60).map(short) })),
+      assistir_mais_tarde: later().slice(0, 60).map(short),
+      historico_recente: store.get('history', []).slice(0, 40).map(short),
+      canais_inscritos: allChannels().map((c) => ({ id: c.id, nome: c.name })),
+      conta_do_youtube_conectada: account.connected,
+    };
+  }
+  return 'Ação desconhecida.';
 }
 
 async function watchView(id, t, listId) {
@@ -1201,7 +1422,6 @@ async function watchView(id, t, listId) {
       <div id="w-comments"></div>
     </div>
     <aside class="w-side enter" style="--d:160ms">
-      <div id="w-ai"></div>
       <div id="w-transcript"></div>
       <div id="w-chat"></div>
       ${pl ? queueHtml(pl, id) : ''}
@@ -1835,7 +2055,7 @@ document.addEventListener('click', (e) => {
   const vid = () => known.get(location.hash.match(/watch\/([\w-]{11})/)?.[1]) || null;
 
   if (el.hasAttribute('data-transcript')) return openTranscript();
-  if (el.hasAttribute('data-ai')) return openAi();
+  if (el.hasAttribute('data-ai')) return aiToggle();
   if (el.dataset.more) {
     e.preventDefault();
     return openMore(el, known.get(el.dataset.more) || { id: el.dataset.more });
