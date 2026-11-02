@@ -8,6 +8,7 @@
 //   a mesma do servidor do PC, com o login por cookies.
 import { Innertube } from 'youtubei.js';
 import ytw from '../../lib/yt-web.js';
+import extras from '../../lib/extras.js';
 
 const { parseCookies, hasLogin, makeInnertube, dig, dig1, txt } = ytw;
 const VIDEO_ID = /^[\w-]{11}$/;
@@ -207,6 +208,31 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
     return { qualities, audio, audios: audio ? audios : [], maxHeight };
   }
 
+  // Legendas (mesma lista do server.js): as do canal, a automática no idioma do vídeo e a tradução para o português.
+  function pickSubs(tracks = []) {
+    const subtitles = [];
+    const _subs = {};
+    const add = (key, url, lang, label, auto) => {
+      _subs[key] = url;
+      subtitles.push({ key, lang, label: label.replace(/^./, (c) => c.toUpperCase()), auto });
+    };
+    const name = (t) => {
+      const n = String(t.name?.text ?? t.name ?? '').replace(/\s*\(.*?\)\s*$/, '');
+      try { return n || langName?.of(t.language_code) || t.language_code; } catch { return n || t.language_code; }
+    };
+    for (const t of tracks) {
+      if (!t.base_url) continue;
+      const url = t.base_url + '&fmt=json3';
+      if (t.kind === 'asr') add('a:' + t.language_code, url, t.language_code, `${name(t)} (automática)`, true);
+      else add(t.language_code, url, t.language_code, name(t), false);
+    }
+    const asr = tracks.find((t) => t.kind === 'asr') || tracks[0];
+    if (asr?.is_translatable && !subtitles.some((s) => /^pt/.test(s.lang))) add('a:pt', asr.base_url + '&fmt=json3&tlang=pt', 'pt', 'Português (tradução automática)', false);
+    const rank = (s) => (/^pt/.test(s.lang) ? 0 : s.auto ? 1 : 2);
+    subtitles.sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label, 'pt'));
+    return { subtitles, _subs };
+  }
+
   // Dados da página do vídeo (data, curtidas, canal, capítulos) lidos do "next" do youtube.com.
   function watchMeta(n) {
     const primary = dig1(n, 'videoPrimaryInfoRenderer') || {};
@@ -285,6 +311,7 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
         audio: f.audio,
         audios: f.audios,
         downloads: [1440, 1080, 720, 480, 360].filter((h) => h <= f.maxHeight),
+        ...pickSubs(basic.captions?.caption_tracks),
       };
     }, fresh);
   }
@@ -302,6 +329,16 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
     if (!r.ok) throw new Error('Contagem indisponível');
     const j = await r.json();
     return { likes: j.likes || 0, dislikes: j.dislikes || 0, rating: j.rating || 0 };
+  });
+  const branding = (id) => cached('br:' + id, 60 * MIN, () => extras.branding(fetch, id)).catch(() => null);
+  const communityChapters = (id) => cached('ch:' + id, 60 * MIN, () => extras.communityChapters(fetch, id));
+  const subtitleCues = (id, key) => cached(`sub:${id}:${key}`, 60 * MIN, async () => {
+    const url = (await video(id))._subs?.[key];
+    if (!url) throw new Error('Legenda não encontrada.');
+    const r = await fetch(url);
+    const text = r.ok ? await r.text() : '';
+    if (!text) throw new Error('O YouTube não entregou essa legenda agora. Tente de novo em instantes.');
+    return extras.cuesFromJson3(JSON.parse(text));
   });
   const profile = () => cached('me:' + (jar().SAPISID || '').slice(0, 12), 30 * MIN, async () => (loggedIn() ? ytw.profile(innertube) : null));
 
@@ -368,6 +405,16 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
     }
     if (p === '/api/segments') { try { return ok(await segments(q('id'))); } catch { return ok([]); } }
     if (p === '/api/votes') { try { return ok(await votes(q('id'))); } catch { return ok(null); } }
+    if (p === '/api/chapters') { try { return ok(await communityChapters(q('id'))); } catch { return ok([]); } }
+    if (p === '/api/branding') {
+      const out = {};
+      await Promise.all(ids(u, VIDEO_ID, 60).map(async (id) => { const b = await branding(id); if (b) out[id] = b; }));
+      return ok(out);
+    }
+    if (p === '/api/subs') {
+      if (!VIDEO_ID.test(q('id'))) return fail(400, 'Vídeo inválido.');
+      return ok(await subtitleCues(q('id'), q('k').slice(0, 40)));
+    }
 
     // Comentários e chat ao vivo (mesmo código do servidor do PC).
     if (p === '/api/comments') {
@@ -419,6 +466,7 @@ export function createApi({ fetch, sha1, storage, uuid = () => crypto.randomUUID
     if (p === '/api/account/me') { try { return ok((await profile()) || {}); } catch { return ok({}); } }
     if (p.startsWith('/api/account/google')) return ok({ status: 'error', error: 'No celular, conecte pelo “Arquivo de login” (cookies.txt).' });
     if (p.startsWith('/api/download')) return fail(501, 'Downloads no app chegam em breve.');
+    if (p === '/api/ai') return ok({ ok: false, error: 'A IA usa o Codex do computador: funciona só no site do PC.' });
     return fail(404, 'Rota desconhecida.');
   }
 

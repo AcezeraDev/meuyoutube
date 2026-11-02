@@ -1,5 +1,5 @@
 import { icon } from './icons.js';
-import { Player, SEG_NAMES } from './player.js';
+import { Player, SEG_NAMES, lastAt } from './player.js';
 import * as lib from './library.js';
 import * as sync from './sync.js';
 import { mountComments, mountChat } from './social.js';
@@ -76,7 +76,7 @@ function loading(delta) {
 
 // Cache no navegador: voltar para uma tela ou abrir de novo um vídeo é instantâneo (3 minutos).
 const apiCache = new Map();
-const CACHEABLE = /^\/api\/(search|channel|feed|video|segments|votes)\b/;
+const CACHEABLE = /^\/api\/(search|channel|feed|video|segments|votes|chapters)\b/;
 async function api(path, { fresh = false } = {}) {
   const hit = apiCache.get(path);
   if (!fresh && hit && Date.now() - hit.t < 3 * 60e3) return hit.data;
@@ -995,6 +995,193 @@ function renderMarks(id) {
     </div>`).join('')}</div>` : '';
 }
 
+// ---------- transcrição: todas as falas do vídeo, para ler, buscar uma palavra e pular para o trecho ----------
+// Busca sem acento e sem maiúsculas ("acao" acha "Ação"); "at" guarda de que letra do texto veio cada letra da versão simplificada.
+function fold(s) {
+  let n = '';
+  const at = [];
+  for (let i = 0; i < s.length; i++) for (const c of s[i].normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()) { n += c; at.push(i); }
+  return { n, at };
+}
+function highlight(text, q) {
+  if (!q) return esc(text);
+  const { n, at } = fold(text);
+  let out = '', last = 0;
+  for (let k = n.indexOf(q); k >= 0; k = n.indexOf(q, k + q.length)) {
+    const a = at[k], b = at[k + q.length - 1] + 1;
+    out += esc(text.slice(last, a)) + `<mark>${esc(text.slice(a, b))}</mark>`;
+    last = b;
+  }
+  return out + esc(text.slice(last));
+}
+// Em tela estreita a lateral fica no fim da página (depois dos comentários): o painel vai para logo abaixo do vídeo.
+function placePanel(box) {
+  if (matchMedia('(max-width: 1100px)').matches) $('#w-row')?.after(box);
+  requestAnimationFrame(() => box.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' }));
+}
+async function openTranscript() {
+  const box = $('#w-transcript');
+  const btn = $('[data-transcript]');
+  if (!box || !player?.info.subtitles?.length) return;
+  const t = token;
+  const info = player.info;
+  if (box.firstChild) { box.innerHTML = ''; btn?.setAttribute('aria-pressed', 'false'); return; }
+  btn?.setAttribute('aria-pressed', 'true');
+  const tracks = info.subtitles;
+  const pick = player.subKey || (tracks.find((s) => /^pt/.test(s.lang)) || tracks[0]).key;
+  box.innerHTML = `<section class="transcript" aria-label="Transcrição do vídeo">
+    <div class="tr-head"><h3>${icon('transcript', 18)}Transcrição</h3><button class="icon-btn rpl" data-tr-close aria-label="Fechar transcrição">${icon('x', 18)}</button></div>
+    <div class="tr-tools">
+      <label class="tr-search">${icon('search', 16)}<input type="search" placeholder="Buscar no que é falado…" aria-label="Buscar na transcrição"></label>
+      ${tracks.length > 1 ? `<select aria-label="Idioma da transcrição">${tracks.map((s) => `<option value="${esc(s.key)}" ${s.key === pick ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select>` : ''}
+    </div>
+    <p class="tr-count meta xs" aria-live="polite"></p>
+    <div class="tr-list"></div>
+  </section>`;
+  placePanel(box);
+  const list = box.querySelector('.tr-list');
+  const input = box.querySelector('input');
+  const count = box.querySelector('.tr-count');
+  let cues = [];
+  let lines = [];
+  let cur = -1;
+
+  const load = async (key) => {
+    list.innerHTML = '<div class="tr-wait"><span class="sw-spin"></span>Carregando as falas…</div>';
+    cues = [];
+    try { cues = await player.cues(key); } catch (e) { if (t === token) list.innerHTML = failure(e); return; }
+    if (t !== token || !list.isConnected) return;
+    list.innerHTML = cues.map((c, i) => `<button class="tr-line" data-cue="${i}"><span class="tr-t">${dur(c.s) || '0:00'}</span><span class="tr-x">${esc(c.t.replace(/\n/g, ' '))}</span></button>`).join('');
+    lines = [...list.children];
+    cur = -1;
+    filter();
+  };
+  const filter = () => {
+    const q = fold(input.value.trim()).n;
+    let hits = 0;
+    lines.forEach((el, i) => {
+      const text = cues[i].t.replace(/\n/g, ' ');
+      const ok = !q || fold(text).n.includes(q);
+      el.hidden = !ok;
+      if (ok) hits++;
+      el.lastElementChild.innerHTML = highlight(text, q);
+    });
+    count.textContent = q ? (hits ? `${hits} ${hits === 1 ? 'trecho' : 'trechos'} com “${input.value.trim()}”` : 'Nada encontrado nesse idioma') : '';
+  };
+  let typing;
+  input.addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(filter, 120); });
+  box.querySelector('select')?.addEventListener('change', (e) => load(e.target.value));
+  box.addEventListener('click', (e) => {
+    if (e.target.closest('[data-tr-close]')) { box.innerHTML = ''; btn?.setAttribute('aria-pressed', 'false'); return; }
+    const line = e.target.closest('[data-cue]');
+    if (!line || !player) return;
+    player.seek(cues[Number(line.dataset.cue)].s);
+    player.play();
+  });
+  // Acompanha o vídeo: destaca a fala atual e rola a lista até ela (menos enquanto você busca ou passa o mouse).
+  const follow = setInterval(() => {
+    if (!list.isConnected || t !== token) return clearInterval(follow);
+    if (!cues.length || !player) return;
+    const i = lastAt(cues, player.now);
+    if (i === cur) return;
+    lines[cur]?.classList.remove('on');
+    cur = i;
+    const el = lines[i];
+    if (!el) return;
+    el.classList.add('on');
+    if (!input.value && !list.matches(':hover') && !el.hidden) list.scrollTo({ top: el.offsetTop - list.clientHeight / 3, behavior: reduced ? 'auto' : 'smooth' });
+  }, 400);
+  await load(pick);
+}
+
+// ---------- IA: perguntas sobre o vídeo (o servidor pergunta ao Codex CLI, com a sua conta do ChatGPT) ----------
+// Markdown simples da resposta: negrito, código, listas e títulos; [4:05] vira um botão que pula para o momento.
+function aiHtml(text) {
+  const inline = (s) => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*\w])\*(?!\s)([^*]+?)\*(?!\w)/g, '$1<i>$2</i>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[((?:\d{1,2}:)?\d{1,2}:\d{2})\]/g, (all, ts) => `<button class="ts" data-seek="${ts.split(':').reduce((a, n) => a * 60 + Number(n), 0)}">${ts}</button>`);
+  const blocks = [];
+  let list = null;
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim();
+    const li = /^([-*•]|\d+[.)])\s+(.*)/.exec(line);
+    if (li) {
+      const tag = /\d/.test(li[1]) ? 'ol' : 'ul';
+      if (!list || list.tag !== tag) blocks.push((list = { tag, items: [] }));
+      list.items.push(inline(li[2]));
+      continue;
+    }
+    list = null;
+    if (!line) continue;
+    const h = /^#{1,4}\s+(.*)/.exec(line);
+    blocks.push(h ? `<p class="ai-h">${inline(h[1])}</p>` : `<p>${inline(line)}</p>`);
+  }
+  return blocks.map((b) => (typeof b === 'string' ? b : `<${b.tag}>${b.items.map((i) => `<li>${i}</li>`).join('')}</${b.tag}>`)).join('');
+}
+const aiChats = new Map(); // vídeo -> [{ q, a | err }] (enquanto o site estiver aberto)
+let aiView = null; // painel aberto agora: { id, render }
+const AI_SUGGEST = ['Resuma o vídeo', 'Quais são os pontos principais?', 'Qual é a conclusão?', 'Explique de um jeito simples'];
+async function openAi() {
+  const box = $('#w-ai');
+  const btn = $('[data-ai]');
+  if (!box || !player) return;
+  if (box.firstChild) { box.innerHTML = ''; aiView = null; btn?.setAttribute('aria-pressed', 'false'); return; }
+  btn?.setAttribute('aria-pressed', 'true');
+  const id = player.info.id;
+  const chat = aiChats.get(id) || [];
+  aiChats.set(id, chat);
+  box.innerHTML = `<section class="ai-panel" aria-label="Perguntas sobre o vídeo">
+    <div class="tr-head"><h3>${icon('sparkles', 18)}IA <span class="meta xs">Codex · sua conta do ChatGPT</span></h3><button class="icon-btn rpl" data-ai-close aria-label="Fechar a IA">${icon('x', 18)}</button></div>
+    <div class="ai-log" aria-live="polite"></div>
+    <form class="ai-form"><textarea rows="1" maxlength="2000" placeholder="Pergunte algo sobre este vídeo…" aria-label="Sua pergunta"></textarea><button class="ai-send rpl" aria-label="Enviar pergunta">${icon('send', 18)}</button></form>
+  </section>`;
+  placePanel(box);
+  const log = box.querySelector('.ai-log');
+  const form = box.querySelector('form');
+  const ta = form.querySelector('textarea');
+  let blocked = '';
+  const render = () => {
+    if (!log.isConnected) return;
+    log.innerHTML = chat.length
+      ? chat.map((m) => `<div class="ai-q">${esc(m.q)}</div>${m.a ? `<div class="ai-a">${aiHtml(m.a)}</div>`
+        : m.err ? `<div class="ai-a ai-err">${icon('alert', 16)}<span>${esc(m.err)}</span></div>`
+          : '<div class="ai-a ai-wait"><span class="ai-dots"><i></i><i></i><i></i></span>Lendo o vídeo e pensando…</div>'}`).join('')
+      : `<div class="ai-empty">
+          <p>Pergunte qualquer coisa sobre este vídeo. A IA lê a transcrição e mostra os momentos para você pular direto para eles.</p>
+          ${blocked ? `<div class="alert">${icon('alert', 20)}<div>${esc(blocked)}</div></div>` : `<div class="ai-chips">${AI_SUGGEST.map((s) => `<button type="button" class="chip" data-ask="${esc(s)}">${esc(s)}</button>`).join('')}</div>`}
+        </div>`;
+    log.scrollTop = log.scrollHeight;
+  };
+  aiView = { id, render };
+  const ask = async (q) => {
+    q = q.trim();
+    if (!q || blocked || chat.some((m) => !m.a && !m.err)) return;
+    const history = chat.filter((m) => m.a).slice(-6).map(({ q: pq, a }) => ({ q: pq, a }));
+    const turn = { q };
+    chat.push(turn);
+    ta.value = '';
+    ta.style.height = '';
+    render();
+    try { turn.a = (await send('/api/ask', { id, q, history })).answer; } catch (e) { turn.err = e.message; }
+    if (aiView?.id === id) aiView.render(); // o painel pode ter sido fechado e aberto de novo enquanto esperava
+  };
+  form.addEventListener('submit', (e) => { e.preventDefault(); ask(ta.value); });
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(ta.value); } });
+  ta.addEventListener('input', () => { ta.style.height = ''; ta.style.height = `${Math.min(ta.scrollHeight, 140)}px`; });
+  box.addEventListener('click', (e) => {
+    if (e.target.closest('[data-ai-close]')) { box.innerHTML = ''; aiView = null; btn?.setAttribute('aria-pressed', 'false'); return; }
+    const chip = e.target.closest('[data-ask]');
+    if (chip) ask(chip.dataset.ask);
+  });
+  render();
+  ta.focus({ preventScroll: true });
+  // Codex instalado e conectado? (só avisa; a pergunta em si também explica o erro, se houver)
+  const st = await fetch('/api/ai').then((r) => r.json()).catch(() => ({ ok: false, error: 'O servidor não respondeu.' }));
+  if (!st.ok && log.isConnected) { blocked = st.error; form.hidden = true; render(); }
+}
+
 async function watchView(id, t, listId) {
   const m = known.get(id) || {};
   const pl = listId ? lib.getPlaylist(listId) : null;
@@ -1014,6 +1201,8 @@ async function watchView(id, t, listId) {
       <div id="w-comments"></div>
     </div>
     <aside class="w-side enter" style="--d:160ms">
+      <div id="w-ai"></div>
+      <div id="w-transcript"></div>
       <div id="w-chat"></div>
       ${pl ? queueHtml(pl, id) : ''}
       <div class="side-head">
@@ -1041,6 +1230,15 @@ async function watchView(id, t, listId) {
   known.set(id, { ...m, ...slim(info), avatar: ch.avatar, thumb: m.thumb });
   document.title = `${info.title} - MeuTube`;
   $('.w-title').textContent = info.title;
+  if (lib.settings().dearrow && lib.settings().dearrowTitles) {
+    loadBranding([id]).then(() => {
+      const b = brandCache.get(id);
+      const h = $('.w-title');
+      if (t !== token || !b?.title || !h) return;
+      h.textContent = b.title;
+      h.title = `Título original: ${info.title}`;
+    });
+  }
   $('#w-row').innerHTML = `
     <div class="w-owner">
       ${info.channelId ? `<a href="#/channel/${info.channelId}" class="av-link" id="w-av" tabindex="-1" aria-hidden="true">${avatar(ch.name, ch.avatar, 'md', ch.id)}</a>` : avatar(ch.name, ch.avatar, 'md')}
@@ -1056,7 +1254,9 @@ async function watchView(id, t, listId) {
         <span class="v-bar" hidden><i></i></span>
       </span>
       ${info.live ? '' : `<button class="pill rpl" data-bg aria-pressed="false">${icon('headphones', 20)}<span class="pl-long">Ouvir em segundo plano</span><span class="pl-short">Segundo plano</span></button>`}
+      ${IN_APP ? '' : `<button class="pill rpl ai-pill" data-ai aria-pressed="false" title="Perguntas sobre o vídeo, respondidas pelo Codex com a sua conta do ChatGPT">${icon('sparkles', 20)}<span>Perguntar à IA</span></button>`}
       <button class="pill rpl" data-goto-comments>${icon('chat', 20)}<span>Comentários</span></button>
+      ${info.subtitles?.length ? `<button class="pill rpl" data-transcript aria-pressed="false" title="Ler, buscar e pular para qualquer fala do vídeo">${icon('transcript', 20)}<span>Transcrição</span></button>` : ''}
       <button class="pill rpl" data-save="${id}">${icon('listPlus', 20)}<span>Salvar</span></button>
       <button class="pill rpl" data-mark title="Guarda o momento atual do vídeo com uma nota">${icon('bookmark', 20)}<span class="pl-long">Marcar momento</span><span class="pl-short">Marcar</span></button>
       <button class="pill rpl" data-share="${id}">${icon('share', 20)}<span>Compartilhar</span></button>
@@ -1142,6 +1342,12 @@ async function watchView(id, t, listId) {
       onSkipToggle: (on) => { lib.setSetting('sponsor', on); toast(on ? 'Vou pular patrocínios' : 'Patrocínios não serão pulados'); },
     });
     renderMarks(id);
+    // Sem capítulos do canal, usa os que a comunidade marcou no SponsorBlock.
+    if (!info.live && !info.chapters?.length) {
+      api('/api/chapters?id=' + id).then((list) => {
+        if (t === token && player?.info.id === id && list.length) player.setChapters(list, true);
+      }).catch(() => {});
+    }
     // Extras em paralelo: trechos de patrocínio (SponsorBlock). Busca sempre, para os trechos aparecerem
     // na barra e o pulo poder ser ligado no menu ⚙ mesmo se estiver desligado nos Ajustes.
     api('/api/segments?id=' + id).then((segs) => {
@@ -1206,8 +1412,19 @@ async function loadRelated(info, t) {
   try {
     const words = info.title.replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter((w) => w.length > 2).slice(0, 4).join(' ');
     const q = encodeURIComponent(`${info.channel} ${words}`);
-    const r = await api('/api/search?ch=0&q=' + q);
-    const items = r.videos.filter((v) => v.id !== info.id);
+    // Uma busca só devolvia sempre a mesma lista. Mistura três fontes (mesmo canal, só o assunto e as
+    // recomendações da conta), embaralha e manda para o fim o que já apareceu em sugestões antes.
+    const [r, topic, rec] = await Promise.all([
+      api('/api/search?ch=0&q=' + q),
+      api('/api/search?ch=0&q=' + encodeURIComponent(words || info.title)).catch(() => ({ videos: [] })),
+      api('/api/feed?k=rec&page=0').catch(() => ({ items: [] })),
+    ]);
+    const ids = new Set([info.id]);
+    const pool = [...r.videos.slice(0, 6), ...topic.videos, ...(rec.items || [])].filter((v) => !ids.has(v.id) && ids.add(v.id) && !v.live);
+    const seen = new Set(store.get('relSeen', []));
+    for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const items = [...pool.filter((v) => !seen.has(v.id)), ...pool.filter((v) => seen.has(v.id))];
+    store.set('relSeen', [...items.slice(0, 20).map((v) => v.id), ...seen].slice(0, 300));
     if (t !== token) return [];
     $('#related').innerHTML = items.length ? compacts(items) : empty('film', 'Sem sugestões');
     if (items.length && r.more) {
@@ -1588,6 +1805,10 @@ function settingsView() {
       <div class="set-row"><span class="set-ic">${icon('dislike', 22)}</span><div><h3>Mostrar “não gostei”</h3><p class="meta sm">O YouTube escondeu esse número. Mostramos a estimativa do Return YouTube Dislike, com uma barrinha de aprovação.</p></div>${sw('dislikes', s.dislikes)}</div>
     </div>
     <div class="set-card" style="--i:2">
+      <div class="set-row"><span class="set-ic">${icon('sparkles', 22)}</span><div><h3>Títulos e miniaturas sem clickbait</h3><p class="meta sm">Usa o DeArrow, do mesmo criador do SponsorBlock: a comunidade reescreve títulos sensacionalistas e escolhe um quadro do vídeo que mostra o que ele é. O site envia só o código do vídeo.</p></div>${sw('dearrow', s.dearrow)}</div>
+      <div class="set-row sub"><span class="set-ic"></span><div><h3>Trocar também os títulos</h3><p class="meta sm">Os títulos da comunidade quase sempre estão em inglês, mesmo quando o YouTube mostra o título em português. Pare o mouse no título para ver o original.</p></div>${sw('dearrowTitles', s.dearrowTitles)}</div>
+    </div>
+    <div class="set-card" style="--i:2">
       <div class="set-row"><span class="set-ic">${icon('zap', 22)}</span><div><h3>Pré-carregar ao passar o mouse</h3><p class="meta sm">Quando o mouse para numa miniatura, o vídeo já começa a carregar e abre bem mais rápido.</p></div>${sw('prefetch', s.prefetch)}</div>
     </div>
     <div class="set-card" style="--i:3">
@@ -1599,7 +1820,7 @@ function settingsView() {
     </div>
     <div class="set-card" style="--i:4">
       <div class="set-row"><span class="set-ic">${icon('gear', 22)}</span><div><h3>Atalhos do player</h3>
-        <div class="keys">${[['K', 'pausar'], ['J / L', '±10 s'], ['← / →', '±5 s'], ['↑ / ↓', 'volume'], ['M', 'mudo'], ['F', 'tela cheia'], ['N', 'próximo'], ['S', 'capturar quadro'], ['< / >', 'velocidade']].map(([k, d]) => `<span><kbd>${esc(k)}</kbd>${d}</span>`).join('')}</div>
+        <div class="keys">${[['K', 'pausar'], ['J / L', '±10 s'], ['← / →', '±5 s'], ['↑ / ↓', 'volume'], ['M', 'mudo'], ['F', 'tela cheia'], ['N', 'próximo'], ['S', 'capturar quadro'], ['C', 'legendas'], ['< / >', 'velocidade']].map(([k, d]) => `<span><kbd>${esc(k)}</kbd>${d}</span>`).join('')}</div>
       </div></div>
     </div>
   </section>`;
@@ -1609,10 +1830,12 @@ function settingsView() {
 document.addEventListener('click', (e) => {
   const t = e.target;
   if (!t.closest?.('.pop, [data-more]')) $('.pop')?.remove();
-  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset], [data-sync-connect], [data-sync-now], [data-sync-off]');
+  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset], [data-sync-connect], [data-sync-now], [data-sync-off], [data-transcript], [data-ai]');
   if (!el) return;
   const vid = () => known.get(location.hash.match(/watch\/([\w-]{11})/)?.[1]) || null;
 
+  if (el.hasAttribute('data-transcript')) return openTranscript();
+  if (el.hasAttribute('data-ai')) return openAi();
   if (el.dataset.more) {
     e.preventDefault();
     return openMore(el, known.get(el.dataset.more) || { id: el.dataset.more });
@@ -2218,6 +2441,48 @@ function hydrateAvatars() {
     for (const v of known.values()) if (!v.avatar && avatarCache.get(v.channelId)) v.avatar = avatarCache.get(v.channelId);
   }, 80);
 }
+// DeArrow: troca títulos e miniaturas sensacionalistas pelos que a comunidade escreveu e escolheu (Ajustes).
+// O título original continua ao parar o mouse em cima. A miniatura só troca depois de carregar (a base às vezes
+// ainda está gerando a imagem; aí fica a do YouTube).
+const brandCache = new Map(); // id -> { title, thumb } | null
+const brandWait = new Map(); // id -> pedido em andamento (a lista pode ser redesenhada antes da resposta chegar)
+async function loadBranding(ids) {
+  ids = [...new Set(ids)];
+  const need = ids.filter((id) => !brandCache.has(id) && !brandWait.has(id)).slice(0, 60);
+  if (need.length) {
+    const job = fetch('/api/branding?ids=' + need.join(',')).then((r) => r.json())
+      .then((r) => { need.forEach((id) => brandCache.set(id, r[id] || null)); return true; })
+      .catch(() => false)
+      .finally(() => need.forEach((id) => brandWait.delete(id)));
+    need.forEach((id) => brandWait.set(id, job));
+  }
+  return (await Promise.all([...new Set(ids.map((id) => brandWait.get(id)).filter(Boolean))])).every(Boolean);
+}
+let brandTimer;
+function hydrateBranding() {
+  if (!lib.settings().dearrow) return;
+  clearTimeout(brandTimer);
+  brandTimer = setTimeout(async () => {
+    const cards = $$('article[data-vid]:not([data-br])');
+    if (!cards.length) return;
+    if (!(await loadBranding(cards.map((c) => c.dataset.vid)))) return; // DeArrow fora do ar: tenta na próxima tela
+    const titles = lib.settings().dearrowTitles;
+    for (const card of $$('article[data-vid]:not([data-br])')) {
+      if (!brandCache.has(card.dataset.vid)) continue; // passou do limite deste pedido: vai no próximo
+      card.dataset.br = '1';
+      const b = brandCache.get(card.dataset.vid);
+      const a = b?.title && titles && card.querySelector('a.title');
+      if (a) { a.title = `Título original: ${a.textContent}`; a.textContent = b.title; }
+      const img = b?.thumb && card.querySelector('.thumb img');
+      if (img) {
+        const pic = new Image();
+        pic.onload = () => { if (img.isConnected && pic.naturalWidth > 1) img.src = pic.src; };
+        pic.src = b.thumb;
+      }
+    }
+    if ($('article[data-vid]:not([data-br])')) hydrateBranding();
+  }, 120);
+}
 // Cada "Carregando…" de limite tenta a tela de novo sozinho, esperando um pouco mais a cada vez.
 function armBlocked() {
   if (!document.querySelector('[data-blocked]')) retryCount.delete(location.hash); // carregou: zera a espera
@@ -2231,7 +2496,7 @@ function armBlocked() {
     setTimeout(() => { if (el.isConnected && t === token) { apiCache.clear(); route(); } }, secs * 1000);
   });
 }
-new MutationObserver(() => { reveal(); hydrateAvatars(); armBlocked(); }).observe(document.body, { childList: true, subtree: true });
+new MutationObserver(() => { reveal(); hydrateAvatars(); hydrateBranding(); armBlocked(); }).observe(document.body, { childList: true, subtree: true });
 
 // Miniaturas inclinam em 3D e ganham um brilho que segue o mouse.
 if (matchMedia('(pointer: fine)').matches && !reduced) {

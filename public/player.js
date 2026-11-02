@@ -1,6 +1,7 @@
 // Player próprio: o YouTube entrega vídeo e áudio separados, então tocamos os dois em sincronia.
 // Extras que o YouTube não tem: modo só áudio, repetir trecho A-B, timer para dormir, capturar quadro,
-// pular patrocínios (SponsorBlock), marcas dos seus momentos e velocidade até 3x lembrada por canal.
+// pular patrocínios (SponsorBlock), marcas dos seus momentos, velocidade até 3x lembrada por canal,
+// legendas desenhadas pelo próprio player e capítulos (do canal ou marcados pela comunidade).
 import { icon } from './icons.js';
 
 const time = (s) => {
@@ -8,6 +9,7 @@ const time = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = String(s % 60).padStart(2, '0');
   return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
 };
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
@@ -20,6 +22,12 @@ const HLS_JS = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.mjs';
 const DOC_PIP = 'documentPictureInPicture' in window;
 const PIP_OK = DOC_PIP || Boolean(document.pictureInPictureEnabled);
 export const SEG_NAMES = { sponsor: 'Patrocínio', selfpromo: 'Autopromoção', interaction: 'Pedido de inscrição', intro: 'Abertura', outro: 'Encerramento', music_offtopic: 'Trecho sem música' };
+// Última fala (ou capítulo) que começou até o tempo t, numa lista em ordem (busca binária: legendas têm milhares).
+export function lastAt(list, t, key = 's') {
+  let lo = 0, hi = list.length - 1, i = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (list[mid][key] <= t) { i = mid; lo = mid + 1; } else hi = mid - 1; }
+  return i;
+}
 
 export class Player {
   constructor(root, info, { start = 0, rate = 1, onEnded, onNext, onProgress, onTick, onToast, onRate, onSkipToggle, onPipBack, onPipClosed } = {}) {
@@ -43,6 +51,11 @@ export class Player {
     this.loopAll = false;
     this.sleep = 0;
     this.watchAcc = 0;
+    this.chapters = info.chapters || [];
+    this.subs = info.subtitles || [];
+    this.subKey = null;
+    this.cueList = [];
+    this.cueCache = new Map();
     this.live = Boolean(info.live);
     root.classList.toggle('live', this.live);
 
@@ -54,13 +67,14 @@ export class Player {
         <span>Modo só áudio · economizando dados</span>
       </div>
       <div class="p-shade"></div>
+      <div class="p-cc" hidden><span></span></div>
       <button class="p-big" data-a="toggle" aria-label="Reproduzir">${icon('play', 34)}</button>
       <div class="p-spin" aria-hidden="true"></div>
       <div class="p-bezel" aria-hidden="true"></div>
       <div class="p-chip" aria-live="polite"></div>
       <div class="p-bar">
         <div class="p-progress" role="slider" tabindex="0" aria-label="Posição do vídeo" aria-valuemin="0">
-          <div class="p-buf"></div><div class="p-marks"></div><div class="p-played"></div><div class="p-knob"></div><div class="p-tip"></div>
+          <div class="p-buf"></div><div class="p-marks"></div><div class="p-played"></div><div class="p-knob"></div><div class="p-tip">${info.storyboard ? '<div class="p-thumb"></div>' : ''}<b class="p-tip-ch"></b><span></span></div>
         </div>
         <div class="p-row">
           <button data-a="toggle" aria-label="Reproduzir">${icon('play', 22)}</button>
@@ -72,8 +86,10 @@ export class Player {
           ${this.live
             ? '<button class="p-live" data-a="golive" title="Ir para o momento atual da live"><i></i>AO VIVO</button>'
             : `<span class="p-time">0:00 / ${time(info.duration)}</span>`}
+          <button class="p-chapter" data-a="chapters" hidden title="Capítulos"><span></span>${icon('chevron', 16)}</button>
           <span class="grow"></span>
           <span class="p-badges"></span>
+          ${this.subs.length ? `<button class="p-cc-btn" data-a="cc" aria-label="Legendas (C)" title="Legendas (C)" aria-pressed="false">${icon('cc', 22)}</button>` : ''}
           <div class="p-menu-wrap">
             <button class="p-gear" data-a="menu" aria-label="Configurações" aria-expanded="false">${icon('gear', 22)}</button>
             <div class="p-menu" role="menu" hidden></div>
@@ -90,6 +106,11 @@ export class Player {
     this.buf = $('.p-buf');
     this.knob = $('.p-knob');
     this.tip = $('.p-tip');
+    this.tipText = $('.p-tip span');
+    this.tipCh = $('.p-tip-ch');
+    this.ccEl = $('.p-cc');
+    this.chapterEl = $('.p-chapter');
+    this.thumb = $('.p-thumb');
     this.timeEl = $('.p-time');
     this.volInput = $('.p-vol input');
     this.menu = $('.p-menu');
@@ -124,6 +145,9 @@ export class Player {
     this.renderVolume();
     this.renderBadges();
     this.mediaSession();
+    // Legendas ligadas da última vez: volta no mesmo idioma (ou na primeira da lista, se este vídeo não tiver).
+    const cc = load('captions', {});
+    if (cc.on && this.subs.length) this.setSubs((this.subs.find((s) => s.lang === cc.lang) || this.subs[0]).key, false);
     this.play();
   }
 
@@ -311,6 +335,19 @@ export class Player {
       if (playing) this.a.play().catch(() => {});
     }, { once: true });
   }
+  // Miniatura da prévia: acha a folha do storyboard que cobre o tempo t e recorta o quadro dela.
+  paintThumb(t) {
+    const sb = this.info.storyboard;
+    let start = 0, k = 0;
+    while (k < sb.sheets.length - 1 && t >= start + sb.sheets[k].dur) start += sb.sheets[k++].dur;
+    const i = Math.min(sb.cols * sb.rows - 1, Math.floor((t - start) * sb.fps));
+    const scale = this.thumb.offsetWidth / sb.w;
+    const s = this.thumb.style;
+    s.backgroundImage = `url("${sb.sheets[k].url}")`;
+    s.backgroundSize = `${sb.cols * sb.w * scale}px auto`;
+    s.backgroundPosition = `-${(i % sb.cols) * sb.w * scale}px -${Math.floor(i / sb.cols) * sb.h * scale}px`;
+    s.aspectRatio = `${sb.w} / ${sb.h}`;
+  }
   seek(t) {
     t = Math.min(Math.max(0, t), this.duration - 0.2);
     if (!this.audioOnly) this.v.currentTime = t;
@@ -438,10 +475,78 @@ export class Player {
     if (!d) { this.v.addEventListener('loadedmetadata', () => this.renderMarks(), { once: true }); return; }
     const pct = (t) => `${(Math.min(t, d) / d) * 100}%`;
     this.marksEl.innerHTML = [
+      ...this.chapters.filter((c) => c.start > 0.5).map((c) => `<i class="chg" style="left:${pct(c.start)}"></i>`),
       ...this.segments.map((s) => `<i class="seg seg-${s.category}" style="left:${pct(s.start)};width:calc(${pct(s.end)} - ${pct(s.start)})" title="${SEG_NAMES[s.category] || s.category}"></i>`),
       ...this.marks.map((m) => `<i class="mk" style="left:${pct(m.t)}" title="${(m.note || time(m.t)).replace(/"/g, '&quot;')}"></i>`),
       this.loopA != null && this.loopB != null ? `<i class="ab" style="left:${pct(this.loopA)};width:calc(${pct(this.loopB)} - ${pct(this.loopA)})"></i>` : '',
     ].join('');
+  }
+
+  // ---------- capítulos: os do canal ou, sem eles, os marcados pela comunidade (SponsorBlock) ----------
+  setChapters(list, community = false) {
+    this.chapters = list || [];
+    this.chaptersCommunity = community;
+    this.curChapter = undefined;
+    this.renderMarks();
+    this.renderChapter();
+  }
+  chapterAt(t) {
+    const c = this.chapters[lastAt(this.chapters, t + 0.01, 'start')];
+    return c && !(c.end && t > c.end) ? c : null; // os da comunidade podem ter buracos entre um e outro
+  }
+  renderChapter() {
+    const c = this.chapters.length ? this.chapterAt(this.now) : null;
+    if (c === this.curChapter) return;
+    this.curChapter = c;
+    this.chapterEl.hidden = !c;
+    this.chapterEl.querySelector('span').textContent = c?.title || '';
+  }
+
+  // ---------- legendas: falas pedidas ao servidor e desenhadas por cima do vídeo ----------
+  cues(key) {
+    if (!this.cueCache.has(key)) {
+      const job = fetch(`/api/subs?id=${this.info.id}&k=${encodeURIComponent(key)}`).then(async (r) => {
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !Array.isArray(j)) throw new Error(j.error || 'Legenda indisponível agora');
+        return j;
+      });
+      job.catch(() => this.cueCache.delete(key));
+      this.cueCache.set(key, job);
+    }
+    return this.cueCache.get(key);
+  }
+  async setSubs(key, remember = true) {
+    const track = this.subs.find((s) => s.key === key) || null;
+    this.subKey = track?.key || null;
+    this.cueList = [];
+    this.renderCue(true);
+    if (remember) save('captions', { on: Boolean(track), lang: track?.lang || load('captions', {}).lang });
+    this.root.querySelector('.p-cc-btn')?.setAttribute('aria-pressed', String(Boolean(track)));
+    if (!track) return;
+    try {
+      const list = await this.cues(track.key);
+      if (this.subKey === track.key) { this.cueList = list; this.renderCue(true); }
+    } catch (e) {
+      if (this.subKey !== track.key) return;
+      this.subKey = null;
+      this.root.querySelector('.p-cc-btn')?.setAttribute('aria-pressed', 'false');
+      this.chip(e.message);
+    }
+  }
+  toggleSubs() {
+    if (this.subKey) { this.setSubs(null); return this.chip('Legendas desligadas'); }
+    const s = this.subs.find((x) => x.lang === load('captions', {}).lang) || this.subs[0];
+    this.setSubs(s.key);
+    this.chip(`Legendas: ${s.label}`);
+  }
+  renderCue(force = false) {
+    const t = this.now;
+    const c = this.cueList[lastAt(this.cueList, t)];
+    const cue = c && t < c.e ? c : null;
+    if (cue === this.curCue && !force) return;
+    this.curCue = cue;
+    this.ccEl.hidden = !cue;
+    this.ccEl.firstElementChild.textContent = cue?.t || '';
   }
 
   // Selos ao lado da engrenagem: mostram o que está ligado.
@@ -461,6 +566,8 @@ export class Player {
     const t = this.now;
     this.renderTime();
     this.syncAudio(false);
+    if (this.subKey) this.renderCue();
+    if (this.chapters.length) this.renderChapter();
     // Repetir trecho A-B
     if (this.loopB != null && t >= this.loopB) { this.seek(this.loopA); return; }
     // Pular patrocínios: só quando a reprodução entra no trecho (se você voltar de propósito, ele deixa).
@@ -563,6 +670,10 @@ export class Player {
         if (act === 'loop') { this.setLoop(val); this.renderMenu('main', -1); }
         if (act === 'sleep') { this.setSleep(Number(val)); this.renderMenu('main', -1); }
         if (act === 'audio-only') { this.setAudioOnly(!this.audioOnly); this.renderMenu('main', 0); }
+        if (act === 'cc') this.toggleSubs();
+        if (act === 'sub') { this.setSubs(val || null); this.renderMenu('main', -1); }
+        if (act === 'chapters') { this.toggleMenu(true); this.renderMenu('chapters', 0); }
+        if (act === 'chapter') { this.seek(Number(val)); this.toggleMenu(false); }
         if (act === 'skip') { this.skipSegments = !this.skipSegments; this.opts.onSkipToggle?.(this.skipSegments); this.renderMenu('main', 0); }
         if (act === 'shot') { this.toggleMenu(false); this.screenshot(); }
         return;
@@ -605,8 +716,12 @@ export class Player {
       const t = p * this.duration;
       const seg = this.segments.find((s) => t >= s.start && t <= s.end);
       const mk = this.marks.find((m) => Math.abs(m.t - t) < this.duration / 120);
-      this.tip.textContent = `${time(t)}${mk?.note ? ` · ${mk.note}` : seg ? ` · ${SEG_NAMES[seg.category] || ''}` : ''}`;
-      this.tip.style.left = `${p * 100}%`;
+      this.tipText.textContent = `${time(t)}${mk?.note ? ` · ${mk.note}` : seg ? ` · ${SEG_NAMES[seg.category] || ''}` : ''}`;
+      this.tipCh.textContent = this.chapters.length ? this.chapterAt(t)?.title || '' : '';
+      if (this.thumb) this.paintThumb(t);
+      // Com a miniatura, a prévia não passa da borda do player (igual ao YouTube).
+      const half = this.thumb ? this.tip.offsetWidth / 2 / this.bar.offsetWidth : 0;
+      this.tip.style.left = `${Math.min(1 - half, Math.max(half, p)) * 100}%`;
       if (this.dragging) this.paint(p);
     });
     on(this.bar, 'pointerdown', (e) => {
@@ -649,6 +764,7 @@ export class Player {
         f: () => this.fullscreen(),
         n: () => this.opts.onNext?.(),
         s: () => this.screenshot(),
+        c: () => { if (this.subs.length) this.toggleSubs(); },
         i: () => { if (PIP_OK) this.togglePip(); },
         '>': () => stepRate(1), '<': () => stepRate(-1),
       }[k];
@@ -851,12 +967,20 @@ export class Player {
         + item('loop', 'b', `Marcar fim aqui e repetir (${time(this.now)})`, this.loopB != null)
         + item('loop', 'all', 'Repetir o vídeo inteiro', this.loopAll)
         + item('loop', 'off', 'Desligar repetição', !this.loopAll && this.loopB == null && this.loopA == null);
+    } else if (panel === 'subs') {
+      html = head('Legendas (tecla C)') + item('sub', '', 'Desligadas', !this.subKey) + this.subs.map((s) => item('sub', s.key, esc(s.label), s.key === this.subKey)).join('');
+    } else if (panel === 'chapters') {
+      const cur = this.chapterAt(this.now);
+      html = head(this.chaptersCommunity ? 'Capítulos (marcados pela comunidade)' : 'Capítulos')
+        + this.chapters.map((c) => item('chapter', c.start, `<span class="pm-ts">${time(c.start)}</span>${esc(c.title)}`, c === cur)).join('');
     } else if (panel === 'sleep') {
       html = head('Timer para dormir') + SLEEP.map((m) => item('sleep', m, m === 0 ? 'Desligado' : m === -1 ? 'No fim deste vídeo' : `${m} minutos`, this.sleep === m)).join('');
     } else {
       html = row('speed', 'gauge', 'Velocidade', speedLabel(this.v.playbackRate))
         + row('quality', 'quality', 'Qualidade', qValue)
         + (audios.length > 1 ? row('audio', 'headphones', 'Faixa de áudio', curAudio?.label || '') : '')
+        + (this.subs.length ? row('subs', 'cc', 'Legendas', esc(this.subs.find((s) => s.key === this.subKey)?.label || 'Desligadas')) : '')
+        + (this.chapters.length ? row('chapters', 'chapters', 'Capítulos', esc(this.chapterAt(this.now)?.title || `${this.chapters.length}`)) : '')
         + row('loop', 'repeat', 'Repetir', loopLabel)
         + row('sleep', 'moon', 'Timer para dormir', sleepLabel)
         + (this.a ? sw('audio-only', 'headphones', 'Modo só áudio', !!this.audioOnly, 'gasta bem menos internet') : '')

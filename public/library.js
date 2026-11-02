@@ -48,7 +48,7 @@ export const updateMark = (vid, i, note) => { const l = marks(vid); if (l[i]) { 
 export const removeMark = (vid, i) => { const l = marks(vid); l.splice(i, 1); saveMarks(vid, l); return l; };
 
 // ---------- ajustes ----------
-const DEFAULTS = { sponsor: true, sponsorCats: ['sponsor', 'selfpromo', 'interaction'], dislikes: true, prefetch: true };
+const DEFAULTS = { sponsor: true, sponsorCats: ['sponsor', 'selfpromo', 'interaction'], dislikes: true, prefetch: true, dearrow: true, dearrowTitles: true };
 export const settings = () => ({ ...DEFAULTS, ...get('settings', {}) });
 export const setSetting = (k, v) => set('settings', { ...get('settings', {}), [k]: v });
 
