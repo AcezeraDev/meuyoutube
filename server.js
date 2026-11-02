@@ -157,14 +157,25 @@ async function ytdlp(args, opts = {}) {
 // trata os pedidos como de um navegador de verdade e quase não bloqueia. O site liga e mantém o gerador vivo.
 const POT_DIR = path.join(__dirname, 'pot-provider', 'server');
 let potProc = null;
+let potFails = 0;
 function startPot() {
   if (!fs.existsSync(path.join(POT_DIR, 'build', 'main.js'))) return console.log('[tokens] gerador não instalado (pasta pot-provider)');
   fetch('http://127.0.0.1:4416/ping', { signal: AbortSignal.timeout(1500) })
     .then(() => console.log('[tokens] gerador de PO token já está rodando'))
     .catch(() => {
-      potProc = spawn(process.execPath, ['build/main.js'], { cwd: POT_DIR, windowsHide: true, stdio: 'ignore' });
-      console.log('[tokens] gerador de PO token ligado');
-      potProc.on('exit', () => { potProc = null; setTimeout(startPot, 5000); }); // caiu? liga de novo
+      const t0 = Date.now();
+      potProc = spawn(process.execPath, ['build/main.js'], { cwd: POT_DIR, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      let err = '';
+      potProc.stderr.setEncoding('utf8').on('data', (d) => { err = (err + d).slice(-2000); });
+      if (!potFails) console.log('[tokens] gerador de PO token ligado');
+      // Caiu? Liga de novo. Se cai logo ao abrir (falta instalar algo, porta ocupada), espera cada vez mais
+      // (até 30 min) e avisa uma vez, em vez de abrir um processo a cada 5 s para sempre.
+      potProc.on('exit', () => {
+        potProc = null;
+        potFails = Date.now() - t0 < 15000 ? potFails + 1 : 0;
+        if (potFails === 3) console.log(`[tokens] o gerador fecha logo ao abrir; tentando de novo com mais calma. Motivo: ${(/Error[^\n]*/.exec(err) || [err.trim().split('\n').pop() || '?'])[0]}`);
+        setTimeout(startPot, potFails ? Math.min(30 * 60e3, 5000 * 2 ** potFails) : 5000);
+      });
     });
 }
 const stopPot = () => { try { potProc?.kill(); } catch {} };
@@ -756,7 +767,7 @@ const CODEX = (() => {
 const AI_DIR = path.join(os.tmpdir(), 'meutube-ia');
 let aiRunning = 0;
 // onLine recebe cada linha da saída assim que chega (no modo --json, um evento por linha); signal cancela.
-function codex(args, input, { timeout = 300000, onLine, signal, cwd = AI_DIR } = {}) {
+function codex(args, input, { timeout = 600000, onLine, signal, cwd = AI_DIR } = {}) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(cwd, { recursive: true });
     const p = spawn(CODEX.cmd, [...CODEX.pre, ...args], { cwd, windowsHide: true });
@@ -924,7 +935,7 @@ async function askAi({ id, q, history, at, frame, images, model, effort, page },
         `Descrição:\n${(info.description || '').slice(0, 5000) || '(sem descrição)'}`,
         chapters ? `Capítulos:\n${chapters}` : '',
         cues.length ? `Transcrição (${(info.subtitles || []).find((s) => s.key === key)?.label || key}):\n${transcriptText(cues)}` : live ? '' : 'Transcrição: este vídeo não tem legendas.',
-        cmtText ? `Comentários em destaque:\n${cmtText}` : '',
+        cmtText ? `Comentários em destaque (só os ${Math.min(40, cmts.length)} primeiros; para ler mais — centenas, os mais recentes ou as respostas — use a ferramenta ver_comentarios):\n${cmtText}` : '',
         chatLines ? `Chat ao vivo (mensagens mais recentes, da mais antiga para a mais nova):\n${chatLines}` : '',
         notes.length ? `Imagens anexadas:\n${notes.join('\n')}` : '',
         '</video>',
@@ -943,14 +954,18 @@ async function askAi({ id, q, history, at, frame, images, model, effort, page },
       '-c', `mcp_servers.meutube.args=${JSON.stringify([MCP])}`,
       '-c', `mcp_servers.meutube.env={ MT_URL = ${JSON.stringify(siteUrl())}, MT_TOKEN = ${JSON.stringify(token)} }`,
       '-c', 'mcp_servers.meutube.default_tools_approval_mode="approve"',
-      '-c', 'mcp_servers.meutube.tool_timeout_sec=150'];
+      // Ferramentas podem demorar (centenas de comentários são dezenas de páginas) e devolver muito texto: sem cortar.
+      '-c', 'mcp_servers.meutube.tool_timeout_sec=420',
+      '-c', 'mcp_servers.meutube.startup_timeout_sec=60', // PC ocupado (vídeo tocando, downloads): dá tempo de a ferramenta abrir
+      '-c', 'mcp_servers.meutube.output_token_limit=150000',
+      '-c', 'tool_output_token_limit=150000'];
     if (m) args.push('-m', m.id);
     if (/^(low|medium|high|xhigh|max|ultra|minimal|none)$/.test(effort || '') && (!m || m.efforts.includes(effort))) args.push('-c', `model_reasoning_effort=${effort}`);
     for (const f of files) args.push(`--image=${f}`);
     args.push('-');
 
     emit({ type: 'status', text: files.length ? 'Olhando as imagens e pensando…' : info ? 'Lendo o vídeo e pensando…' : 'Pensando…' });
-    const TOOL_LABEL = { buscar_videos: (a) => `Buscando vídeos: ${a.query}`, ver_video: () => 'Abrindo os dados de um vídeo…', ver_transcricao: () => 'Lendo a transcrição de um vídeo…', ver_comentarios: () => 'Lendo comentários…', ver_chat_ao_vivo: () => 'Lendo o chat ao vivo…', ver_canal: () => 'Olhando um canal…', ver_feed: () => 'Olhando as listas da sua conta…', abrir_video: () => 'Abrindo um vídeo…', abrir_pagina: (a) => `Indo para ${a.pagina}…`, controlar_player: (a) => `Mexendo no player: ${a.acao}…`, salvar_video: () => 'Salvando o vídeo…', ver_meu_meutube: () => 'Olhando suas playlists e listas…' };
+    const TOOL_LABEL = { buscar_videos: (a) => `Buscando vídeos: ${a.query}`, ver_video: () => 'Abrindo os dados de um vídeo…', ver_transcricao: () => 'Lendo a transcrição de um vídeo…', ver_comentarios: (a) => `Lendo ${a.quantidade || 100} comentários${a.ordem === 'recentes' ? ' (mais recentes)' : ''}…`, ver_chat_ao_vivo: () => 'Lendo o chat ao vivo…', ver_canal: () => 'Olhando um canal…', ver_feed: () => 'Olhando as listas da sua conta…', abrir_video: () => 'Abrindo um vídeo…', abrir_pagina: (a) => `Indo para ${a.pagina}…`, controlar_player: (a) => `Mexendo no player: ${a.acao}…`, salvar_video: () => 'Salvando o vídeo…', ver_meu_meutube: () => 'Olhando suas playlists e listas…' };
     let answer = '';
     const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'a página'; } };
     await codex(args, prompt, {
@@ -1359,6 +1374,11 @@ http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (!aiSessions.has(b.token)) return json(res, 404, { error: 'A pergunta já terminou.' });
       return json(res, 200, { result: await aiAction(b.token, b.action || {}) });
+    }
+    if (u.pathname === '/api/ai/progress' && req.method === 'POST') {
+      const b = await readBody(req);
+      aiSessions.get(b.token)?.emit({ type: 'status', text: String(b.text || '').slice(0, 160) });
+      return json(res, 200, { ok: true });
     }
     if (u.pathname === '/api/ai/act-result' && req.method === 'POST') {
       const b = await readBody(req, 2e6);

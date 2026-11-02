@@ -1408,7 +1408,7 @@ async function watchView(id, t, listId) {
   const pl = listId ? lib.getPlaylist(listId) : null;
   const autoplay = store.get('autoplay', true);
   document.title = m.title ? `${m.title} - MeuTube` : 'MeuTube';
-  app.innerHTML = `<section class="view watch">
+  app.innerHTML = `<section class="view watch ${store.get('hideRelated', false) ? 'no-related' : ''}">
     <div class="w-main">
       <div class="ambient" aria-hidden="true"><img src="https://i.ytimg.com/vi/${id}/mqdefault.jpg" alt=""></div>
       <div class="player loading" id="player" style="view-transition-name:media">
@@ -1428,6 +1428,7 @@ async function watchView(id, t, listId) {
       <div class="side-head">
         <div class="chips small"><button class="chip on">A seguir</button>${m.channel ? `<span class="chip ghost">De ${esc(m.channel)}</span>` : ''}</div>
         <label class="switch" title="Reprodução automática"><input type="checkbox" id="autoplay" ${autoplay ? 'checked' : ''}><span>Automático</span></label>
+        <button class="icon-btn rpl related-hide" data-related-toggle title="Esconder as sugestões" aria-label="Esconder as sugestões">${icon('eyeOff', 20)}</button>
       </div>
       <div id="related">${skCompact()}</div>
     </aside>
@@ -1480,6 +1481,7 @@ async function watchView(id, t, listId) {
       <button class="pill rpl" data-save="${id}">${icon('listPlus', 20)}<span>Salvar</span></button>
       <button class="pill rpl" data-mark title="Guarda o momento atual do vídeo com uma nota">${icon('bookmark', 20)}<span class="pl-long">Marcar momento</span><span class="pl-short">Marcar</span></button>
       <button class="pill rpl" data-share="${id}">${icon('share', 20)}<span>Compartilhar</span></button>
+      <button class="pill rpl related-show" data-related-toggle title="Mostrar a lista “A seguir” de novo">${icon('eye', 20)}<span>Mostrar sugestões</span></button>
       ${info.live || IN_APP ? '' : downloadMenu(info)}
     </div>`;
   const watching = (n) => `<span id="w-watching">${n ? `${nf.format(n)} assistindo agora` : ''}</span>`;
@@ -2050,8 +2052,15 @@ function settingsView() {
 document.addEventListener('click', (e) => {
   const t = e.target;
   if (!t.closest?.('.pop, [data-more]')) $('.pop')?.remove();
-  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset], [data-sync-connect], [data-sync-now], [data-sync-off], [data-transcript], [data-ai]');
+  const el = t.closest?.('[data-more], [data-pop], [data-save], [data-mark], [data-mark-del], [data-queue], [data-close-modal], [data-pl-play], [data-pl-shuffle], [data-pl-rename], [data-pl-delete], [data-pl-remove], [data-pl-move], [data-unword], [data-unblock], [data-stats-reset], [data-sync-connect], [data-sync-now], [data-sync-off], [data-transcript], [data-ai], [data-related-toggle]');
   if (!el) return;
+  // Esconder/mostrar a lista "A seguir" (lembrado; a reprodução automática continua usando a lista escondida).
+  if (el.hasAttribute('data-related-toggle')) {
+    const hide = !store.get('hideRelated', false);
+    store.set('hideRelated', hide);
+    $('.watch')?.classList.toggle('no-related', hide);
+    return toast(hide ? 'Sugestões escondidas' : 'Sugestões de volta');
+  }
   const vid = () => known.get(location.hash.match(/watch\/([\w-]{11})/)?.[1]) || null;
 
   if (el.hasAttribute('data-transcript')) return openTranscript();

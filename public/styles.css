@@ -397,6 +397,16 @@ button.pill:active, a.pill:active { transform: scale(0.94); }
 body.watching main { margin-left: 0; }
 .watch { display: grid; grid-template-columns: minmax(0, 1fr) 402px; gap: 24px; padding-top: 24px; max-width: 1800px; }
 .w-main { position: relative; min-width: 0; }
+/* Sugestões ("A seguir") escondidas: some a lista; sem chat, fila ou transcrição na lateral, o vídeo fica com a
+   largura toda (centralizado e sem passar da altura da tela). */
+.watch.no-related #related, .watch.no-related .side-head { display: none; }
+.watch:not(.no-related) .related-show { display: none; }
+.side-head .related-hide { width: 36px; height: 36px; margin-left: -6px; color: var(--text-2); }
+@media (min-width: 1101px) {
+  .watch.no-related:not(:has(#w-transcript > *, #w-chat > *, #queue)) { grid-template-columns: minmax(0, 1fr); }
+  .watch.no-related:not(:has(#w-transcript > *, #w-chat > *, #queue)) .w-side { display: none; }
+  .watch.no-related:not(:has(#w-transcript > *, #w-chat > *, #queue)) .w-main { width: 100%; max-width: max(640px, calc((100vh - var(--mh) - 190px) * 16 / 9)); margin: 0 auto; }
+}
 /* backwards (não both): terminada a entrada, o bloco fica sem transform/filter; senão o menu Baixar (fixed no celular)
    passa a se posicionar pelo bloco e não pela tela. */
 .enter { animation: enter 0.75s var(--soft-spring) backwards; animation-delay: var(--d, 0ms); }
@@ -1283,7 +1293,8 @@ body.has-minibar .ai-drawer { bottom: 84px; }
 .ai-q-imgs img { width: 84px; height: 56px; object-fit: cover; border-radius: 8px; }
 .ai-q-tag { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; padding: 1px 7px; border-radius: 99px; background: rgba(255, 255, 255, 0.1); font-size: 11px; font-weight: 700; vertical-align: 1px; }
 .ai-a a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
-.ai-form { flex-direction: column; align-items: stretch; }
+.ai-drawer .ai-form { flex-direction: column; align-items: stretch; }
+.ai-drawer .ai-form textarea { overflow-y: auto; scrollbar-width: thin; }
 .ai-attach { display: flex; flex-wrap: wrap; gap: 8px; }
 .ai-attach:empty { display: none; }
 .ai-thumb { position: relative; }
